@@ -1,0 +1,216 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  width: 100%;
+  overflow-x: hidden;
+}
+
+:root {
+  /* Enterprise Color Palette - Default */
+  --primary-color: #2563eb;
+  --primary-dark: #1e40af;
+  --primary-light: #3b82f6;
+  --secondary-color: #7c3aed;
+  --secondary-dark: #6d28d9;
+  --secondary-light: #8b5cf6;
+  --accent-color: #06b6d4;
+  
+  /* Semantic Colors - Default */
+  --success-color: #10b981;
+  --warning-color: #f59e0b;
+  --error-color: #ef4444;
+  --info-color: #3b82f6;
+  
+  /* Semantic Backgrounds - Default */
+  --success-bg: rgba(16, 185, 129, 0.1);
+  --warning-bg: rgba(245, 158, 11, 0.1);
+  --error-bg: rgba(239, 68, 68, 0.1);
+  --info-bg: rgba(59, 130, 246, 0.1);
+  
+  /* Neutral Colors - Light Mode */
+  --bg-primary: #ffffff;
+  --bg-secondary: #f8fafc;
+  --bg-tertiary: #f1f5f9;
+  --bg-dark: #0f172a;
+  --bg-card: #ffffff;
+  
+  /* Text Colors - Light Mode */
+  --text-primary: #1e293b;
+  --text-secondary: #64748b;
+  --text-tertiary: #94a3b8;
+  --text-inverse: #ffffff;
+  
+  /* Border & Shadow - Enhanced Depth */
+  --border-color: #e2e8f0;
+  --border-radius: 12px;
+  --border-radius-lg: 16px;
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  --shadow-2xl: 0 25px 50px -12px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(0, 0, 0, 0.05);
+  --shadow-inner: inset 0 2px 4px 0 rgba(0, 0, 0, 0.06);
+  --shadow-glow: 0 0 20px rgba(174, 39, 95, 0.15);
+  
+  /* Spacing */
+  --spacing-xs: 0.25rem;
+  --spacing-sm: 0.5rem;
+  --spacing-md: 1rem;
+  --spacing-lg: 1.5rem;
+  --spacing-xl: 2rem;
+  --spacing-2xl: 3rem;
+  
+  /* Typography */
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+  --font-mono: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', 'Consolas', monospace;
+  
+  /* Header Colors - Default */
+  --header-bg-start: #2563eb;
+  --header-bg-end: #7c3aed;
+  --header-text: #ffffff;
+  --header-text-secondary: rgba(255, 255, 255, 0.9);
+}
+
+/* Dark Mode */
+[data-theme="dark"] {
+  --bg-primary: #0f172a;
+  --bg-secondary: #1e293b;
+  --bg-tertiary: #334155;
+  --bg-card: #1e293b;
+  
+  --text-primary: #f1f5f9;
+  --text-secondary: #cbd5e1;
+  --text-tertiary: #94a3b8;
+  --text-inverse: #0f172a;
+  
+  --border-color: #334155;
+  
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -1px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.4), 0 4px 6px -2px rgba(0, 0, 0, 0.3);
+  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 10px 10px -5px rgba(0, 0, 0, 0.4);
+  --shadow-2xl: 0 25px 50px -12px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  --shadow-inner: inset 0 2px 4px 0 rgba(0, 0, 0, 0.3);
+  --shadow-glow: 0 0 30px rgba(59, 130, 246, 0.2);
+}
+
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 50%, #f1f5f9 100%);
+  min-height: 100vh;
+  color: var(--text-primary);
+  line-height: 1.6;
+  transition: background 0.3s ease, color 0.3s ease;
+  position: relative;
+  overflow-x: hidden;
+}
+
+/* Animated Mesh Gradient Background for Main App */
+body::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: 
+    linear-gradient(45deg, rgba(174, 39, 95, 0.08) 0%, transparent 50%),
+    linear-gradient(135deg, rgba(59, 130, 246, 0.08) 50%, transparent 100%),
+    linear-gradient(225deg, rgba(139, 92, 246, 0.06) 0%, transparent 50%),
+    linear-gradient(315deg, rgba(235, 17, 101, 0.06) 50%, transparent 100%);
+  background-size: 200% 200%;
+  animation: meshMove 20s ease infinite;
+  pointer-events: none;
+  z-index: 0;
+}
+
+@keyframes meshMove {
+  0% {
+    background-position: 0% 0%, 100% 100%, 0% 100%, 100% 0%;
+  }
+  50% {
+    background-position: 100% 100%, 0% 0%, 100% 0%, 0% 100%;
+  }
+  100% {
+    background-position: 0% 0%, 100% 100%, 0% 100%, 100% 0%;
+  }
+}
+
+/* Animated Geometric Grid */
+body::after {
+  content: '';
+  position: fixed;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background-image: 
+    repeating-linear-gradient(45deg, transparent, transparent 100px, rgba(174, 39, 95, 0.02) 100px, rgba(174, 39, 95, 0.02) 200px),
+    repeating-linear-gradient(-45deg, transparent, transparent 100px, rgba(59, 130, 246, 0.02) 100px, rgba(59, 130, 246, 0.02) 200px);
+  animation: gridRotate 30s linear infinite;
+  pointer-events: none;
+  z-index: 0;
+}
+
+@keyframes gridRotate {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+[data-theme="dark"] body {
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+}
+
+[data-theme="dark"] body::before {
+  background: 
+    linear-gradient(45deg, rgba(59, 130, 246, 0.12) 0%, transparent 50%),
+    linear-gradient(135deg, rgba(139, 92, 246, 0.1) 50%, transparent 100%),
+    linear-gradient(225deg, rgba(34, 211, 238, 0.08) 0%, transparent 50%),
+    linear-gradient(315deg, rgba(174, 39, 95, 0.06) 50%, transparent 100%);
+}
+
+[data-theme="dark"] body::after {
+  background-image: 
+    repeating-linear-gradient(45deg, transparent, transparent 100px, rgba(59, 130, 246, 0.04) 100px, rgba(59, 130, 246, 0.04) 200px),
+    repeating-linear-gradient(-45deg, transparent, transparent 100px, rgba(139, 92, 246, 0.04) 100px, rgba(139, 92, 246, 0.04) 200px);
+}
+
+code {
+  font-family: var(--font-mono);
+}
+
+/* Smooth scrolling */
+html {
+  scroll-behavior: smooth;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-tertiary);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--text-tertiary);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
