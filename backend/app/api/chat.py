@@ -29,40 +29,53 @@ def _get_biu_spoc_message() -> str:
 
 def _simplify_query_remove_unnecessary_join(sql: str, question: str) -> Optional[str]:
     """
-    Simplify SQL by removing unnecessary joins with caselite_loan_applications
-    when super_loan_account_dim.SCHEME is already being used.
+    Simplify SQL by removing unnecessary joins when a table already has the needed columns.
+    Generic - works for any tables, not hardcoded to specific table names.
     """
     sql_upper = sql.upper()
     
-    # Only simplify if query uses super_loan_account_dim.SCHEME and joins with caselite_loan_applications
-    if "SUPER_LOAN_ACCOUNT_DIM" in sql_upper and "CASELITE_LOAN_APPLICATIONS" in sql_upper:
-        # Check if SCHEME is used (case-insensitive)
-        if re.search(r"(SLA|SUPER_LOAN_ACCOUNT_DIM)\.SCHEME", sql_upper):
+    # Extract tables from SQL
+    from app.services.schema_helper import get_tables_from_sql
+    tables = get_tables_from_sql(sql)
+    
+    # Only simplify if query has a JOIN (2+ tables)
+    if len(tables) < 2:
+        return None
+    
+    # Check if query returns 0 rows and has a JOIN - might be unnecessary join
+    # This is a generic check - we'll let the validator/LLM handle specific cases
+    if "JOIN" in sql_upper:
             _logger.info("Attempting to simplify query by removing unnecessary join...")
             
-            # Extract SELECT columns (remove cla references)
+            # Extract SELECT columns
             select_match = re.search(r"SELECT\s+(.+?)\s+FROM", sql, re.IGNORECASE | re.DOTALL)
             if not select_match:
                 return None
             
+            # Get the first table (main table) from FROM clause
+            from_match = re.search(r"FROM\s+(\w+)(?:\s+\w+)?", sql, re.IGNORECASE)
+            if not from_match:
+                return None
+            
+            main_table = from_match.group(1)
+            
             select_clause = select_match.group(1)
-            # Remove cla references from SELECT
+            # Extract columns, keeping only those from main table
             select_cols = re.split(r",", select_clause)
             simplified_select = []
             for col in select_cols:
                 col = col.strip()
-                # Skip columns from caselite_loan_applications
-                if re.search(r"\b(CLA|CASELITE_LOAN_APPLICATIONS)\.", col, re.IGNORECASE):
-                    continue
-                # Replace sla alias or remove it
-                col = re.sub(r"\bSLA\.", "", col, flags=re.IGNORECASE)
-                simplified_select.append(col)
+                # Keep columns that don't reference joined tables (no table prefix or main table prefix)
+                if not re.search(r"\w+\.", col, re.IGNORECASE) or re.search(rf"\b{main_table}\.", col, re.IGNORECASE):
+                    # Remove table prefix if present
+                    col = re.sub(rf"\b{main_table}\.", "", col, flags=re.IGNORECASE)
+                    simplified_select.append(col)
             
             if not simplified_select:
                 return None
             
-            # Build simplified SQL
-            simplified_sql = f"SELECT {', '.join(simplified_select)} FROM super_loan_account_dim"
+            # Build simplified SQL using main table
+            simplified_sql = f"SELECT {', '.join(simplified_select)} FROM {main_table}"
             
             # Extract WHERE conditions
             where_match = re.search(r"WHERE\s+(.+?)(?:\s+ORDER\s+BY|\s*$)", sql, re.IGNORECASE | re.DOTALL)
@@ -74,12 +87,11 @@ def _simplify_query_remove_unnecessary_join(sql: str, question: str) -> Optional
                 simplified_conditions = []
                 for condition in conditions:
                     condition = condition.strip()
-                    # Skip conditions referencing caselite_loan_applications (cla)
-                    if re.search(r"\b(CLA|CASELITE_LOAN_APPLICATIONS)\.", condition, re.IGNORECASE):
-                        continue
-                    # Replace sla alias or remove it
-                    condition = re.sub(r"\bSLA\.", "", condition, flags=re.IGNORECASE)
-                    simplified_conditions.append(condition)
+                    # Keep conditions that reference main table or have no table prefix
+                    if not re.search(r"\w+\.", condition, re.IGNORECASE) or re.search(rf"\b{main_table}\.", condition, re.IGNORECASE):
+                        # Remove table prefix if present
+                        condition = re.sub(rf"\b{main_table}\.", "", condition, flags=re.IGNORECASE)
+                        simplified_conditions.append(condition)
                 
                 if simplified_conditions:
                     simplified_sql += f" WHERE {' AND '.join(simplified_conditions)}"
@@ -88,17 +100,16 @@ def _simplify_query_remove_unnecessary_join(sql: str, question: str) -> Optional
             order_match = re.search(r"ORDER\s+BY\s+(.+?)(?:\s*$)", sql, re.IGNORECASE | re.DOTALL)
             if order_match:
                 order_clause = order_match.group(1).strip()
-                # Remove cla references from ORDER BY
-                order_clause = re.sub(r"\b(CLA|CASELITE_LOAN_APPLICATIONS)\.", "", order_clause, flags=re.IGNORECASE)
-                order_clause = re.sub(r"\bSLA\.", "", order_clause, flags=re.IGNORECASE)
+                # Remove table prefixes from ORDER BY
+                order_clause = re.sub(rf"\b{main_table}\.", "", order_clause, flags=re.IGNORECASE)
+                # Remove any other table references (joined tables)
+                order_clause = re.sub(r"\b\w+\.", "", order_clause, flags=re.IGNORECASE)
                 simplified_sql += f" ORDER BY {order_clause}"
             
             _logger.info(f"Simplified SQL generated: {simplified_sql}")
             return simplified_sql
-        else:
-            _logger.debug("Query uses SCHEME but simplification conditions not met")
     else:
-        _logger.debug("Query doesn't match simplification criteria")
+        _logger.debug("Query does not have a JOIN - no simplification needed")
     
     return None
 
@@ -351,59 +362,8 @@ async def chat_query(request: ChatRequest, db: Session = Depends(get_db)):
                 route_reason=decision.get("reason"),
             )
         
-        # SQL Validator Agent: Validate and correct SQL before execution
-        validator = SQLValidatorAgent(db=db)
-        schema_info = sql_agent.get_schema_info() if hasattr(sql_agent, "get_schema_info") else None
-        validation_result = validator.validate_and_correct(
-            sql_query=cleaned_sql,
-            original_question=request.question,
-            schema_info=schema_info
-        )
-        
-        # Store validator and schema_info for potential use in exception handler
-        _validator = validator
-        _schema_info = schema_info
-        
-        # Always use corrected SQL if available (even if validation says invalid - let execution try it)
-        if validation_result.get("corrected_sql"):
-            corrected_sql = validation_result["corrected_sql"]
-            # Validate the corrected SQL is safe (no dangerous operations)
-            if sql_agent.validate_sql(corrected_sql):
-                cleaned_sql = corrected_sql
-                used_agent = f"{used_agent}_validated"
-                _logger.info(f"Using corrected SQL from validator: {used_agent}")
-            else:
-                # Corrected SQL has dangerous operations - reject it
-                return ChatResponse(
-                    answer=f"Error: Corrected SQL contains unsafe operations and was blocked.",
-                    sql_query=cleaned_sql,
-                    data=[],
-                    row_count=0,
-                    is_predefined=False,
-                    success=False,
-                    error="Unsafe SQL query detected in corrected SQL",
-                    agent_used=used_agent,
-                    route_reason=decision.get("reason"),
-                )
-        elif not validation_result["valid"]:
-            # No corrected SQL available and validation failed
-            error_msg = validation_result.get('error', 'Unknown error')
-            # Check if error is related to missing columns/fields
-            is_column_error = "Invalid column" in error_msg or "column" in error_msg.lower() or "42S22" in error_msg
-            answer_text = f"Error: SQL query validation failed. {error_msg}"
-            if is_column_error:
-                answer_text += _get_biu_spoc_message()
-            return ChatResponse(
-                answer=answer_text,
-                sql_query=cleaned_sql,
-                data=[],
-                row_count=0,
-                is_predefined=False,
-                success=False,
-                error=error_msg,
-                agent_used=used_agent,
-                route_reason=decision.get("reason"),
-            )
+        # SQL Validator Agent: Will be initialized only if SQLMaker's SQL fails during execution (fallback)
+        # Do NOT call validator here - let SQLMaker's SQL execute first
 
         # FollowUp Agent (before execution)
         if not request.skip_followups:
@@ -434,10 +394,9 @@ async def chat_query(request: ChatRequest, db: Session = Depends(get_db)):
             row_count = len(data)
 
             # If query returns 0 rows and uses unnecessary joins, try simplified version
-            if row_count == 0 and "JOIN" in cleaned_sql.upper() and "SUPER_LOAN_ACCOUNT_DIM" in cleaned_sql.upper():
-                # Check if we can simplify by removing join with caselite_loan_applications
-                cleaned_sql_upper = cleaned_sql.upper()
-                if "CASELITE_LOAN_APPLICATIONS" in cleaned_sql_upper and re.search(r"(SLA|SUPER_LOAN_ACCOUNT_DIM)\.SCHEME", cleaned_sql_upper):
+            if row_count == 0 and "JOIN" in cleaned_sql.upper():
+                # Check if we can simplify by removing unnecessary join
+                # Generic check - works for any tables
                     _logger.info("Query returned 0 rows with join, attempting simplified version...")
                     simplified_sql = _simplify_query_remove_unnecessary_join(cleaned_sql, request.question)
                     if simplified_sql and simplified_sql != cleaned_sql:
@@ -462,29 +421,7 @@ async def chat_query(request: ChatRequest, db: Session = Depends(get_db)):
                             _logger.warning(f"Simplified SQL failed safety validation")
                     else:
                         _logger.warning(f"Could not generate simplified SQL. simplified_sql={simplified_sql is not None}, different={simplified_sql != cleaned_sql if simplified_sql else False}")
-                        # Fallback: Use validator to correct the SQL
-                        _logger.info("Falling back to validator for SQL correction...")
-                        correction_result = _validator.validate_and_correct(
-                            sql_query=cleaned_sql,
-                            original_question=request.question,
-                            schema_info=_schema_info
-                        )
-                        if correction_result.get("corrected_sql") and correction_result["corrected_sql"] != cleaned_sql:
-                            corrected_sql = correction_result["corrected_sql"]
-                            if sql_agent.validate_sql(corrected_sql):
-                                try:
-                                    _logger.info(f"Trying validator-corrected SQL: {corrected_sql[:200]}...")
-                                    db_result = db.execute(text(corrected_sql))
-                                    rows = db_result.fetchall()
-                                    columns = db_result.keys()
-                                    data = [dict(zip(columns, row)) for row in rows]
-                                    row_count = len(data)
-                                    if row_count > 0:
-                                        cleaned_sql = corrected_sql
-                                        used_agent = f"{used_agent}_validator_corrected"
-                                        _logger.info(f"✅ Validator-corrected query returned {row_count} rows")
-                                except Exception as e:
-                                    _logger.error(f"Validator-corrected query execution failed: {e}", exc_info=True)
+                        # Note: If execution fails, validator will be called in exception handler
 
             ql = request.question.lower()
             if row_count == 0:
@@ -506,75 +443,68 @@ async def chat_query(request: ChatRequest, db: Session = Depends(get_db)):
             )
         except Exception as e:
             error_str = str(e)
-            # Check if error is due to invalid column names
-            if "Invalid column name" in error_str or "42S22" in error_str:
-                # Try to correct using validator
-                _logger.info(f"SQL execution failed with column error, attempting correction: {error_str}")
-                correction_result = _validator.validate_and_correct(
-                    sql_query=cleaned_sql,
-                    original_question=request.question,
-                    schema_info=_schema_info
-                )
-                
-                if correction_result["valid"] and correction_result.get("corrected_sql"):
-                    corrected_sql = correction_result["corrected_sql"]
-                    # Validate corrected SQL is safe
-                    if sql_agent.validate_sql(corrected_sql):
-                        try:
-                            # Retry with corrected SQL
-                            db_result = db.execute(text(corrected_sql))
-                            rows = db_result.fetchall()
-                            columns = db_result.keys()
-                            data = [dict(zip(columns, row)) for row in rows]
-                            row_count = len(data)
-                            
-                            ql = request.question.lower()
-                            if row_count == 0:
-                                answer_text = "No records found matching your query."
-                            elif "how many" in ql or "count" in ql:
-                                answer_text = f"Found {row_count} record(s)."
-                            else:
-                                answer_text = f"Found {row_count} record(s)."
-                            
-                            return ChatResponse(
-                                answer=answer_text,
-                                sql_query=corrected_sql,
-                                data=data,
-                                row_count=row_count,
-                                is_predefined=False,
-                                success=True,
-                                agent_used=f"{used_agent}_corrected",
-                                route_reason=decision.get("reason"),
-                            )
-                        except Exception as retry_error:
-                            _logger.error(f"Corrected SQL also failed: {retry_error}")
-                            # If correction also fails, return error with SPOC info
-                            answer_text = f"Error: Unable to execute the query. The requested column or field may not exist in the database schema.{_get_biu_spoc_message()}"
-                            return ChatResponse(
-                                answer=answer_text,
-                                sql_query=corrected_sql,
-                                data=[],
-                                row_count=0,
-                                is_predefined=False,
-                                success=False,
-                                error=str(retry_error),
-                                agent_used=f"{used_agent}_correction_failed",
-                                route_reason=decision.get("reason"),
-                            )
-                else:
-                    # No correction available - return error with SPOC info
-                    answer_text = f"Error: Unable to execute the query. The requested column or field may not exist in the database schema.{_get_biu_spoc_message()}"
-                    return ChatResponse(
-                        answer=answer_text,
+            # Check if error is due to invalid column names, table names, or syntax errors
+            is_column_error = "Invalid column" in error_str or "column" in error_str.lower() or "42S22" in error_str
+            is_table_error = "Invalid object name" in error_str or "table" in error_str.lower()
+            is_syntax_error = "syntax" in error_str.lower() or "incorrect syntax" in error_str.lower()
+            
+            # SQL Validator Agent: Use as fallback when SQLMaker's SQL fails during execution
+            if is_column_error or is_table_error or is_syntax_error:
+                try:
+                    _logger.info(f"SQLMaker query failed. Attempting correction using SQL Validator Agent: {error_str}")
+                    
+                    # Initialize validator (lazy - only when needed as fallback)
+                    validator = SQLValidatorAgent(db=db)
+                    schema_info = sql_agent.get_schema_info() if hasattr(sql_agent, "get_schema_info") else None
+                    
+                    # Try to correct the SQL
+                    correction_result = validator.validate_and_correct(
                         sql_query=cleaned_sql,
-                        data=[],
-                        row_count=0,
-                        is_predefined=False,
-                        success=False,
-                        error=error_str,
-                        agent_used=f"{used_agent}_no_correction",
-                        route_reason=decision.get("reason"),
+                        original_question=request.question,
+                        schema_info=schema_info,
+                        error_message=error_str
                     )
+                
+                    if correction_result.get("corrected_sql"):
+                        corrected_sql = correction_result["corrected_sql"]
+                        # Validate corrected SQL is safe
+                        if sql_agent.validate_sql(corrected_sql):
+                            try:
+                                # Retry with corrected SQL
+                                _logger.info(f"✅ Validator provided corrected SQL. Retrying execution...")
+                                db_result = db.execute(text(corrected_sql))
+                                rows = db_result.fetchall()
+                                columns = db_result.keys()
+                                data = [dict(zip(columns, row)) for row in rows]
+                                row_count = len(data)
+                                
+                                ql = request.question.lower()
+                                if row_count == 0:
+                                    answer_text = "No records found matching your query."
+                                elif "how many" in ql or "count" in ql:
+                                    answer_text = f"Found {row_count} record(s)."
+                                else:
+                                    answer_text = f"Found {row_count} record(s)."
+                                
+                                return ChatResponse(
+                                    answer=answer_text,
+                                    sql_query=corrected_sql,
+                                    data=data,
+                                    row_count=row_count,
+                                    is_predefined=False,
+                                    success=True,
+                                    agent_used=f"{used_agent}_validator_corrected",
+                                    route_reason=decision.get("reason"),
+                                )
+                            except Exception as retry_error:
+                                _logger.error(f"Validator-corrected SQL also failed: {retry_error}")
+                                # Fall through to return original error
+                        else:
+                            _logger.warning("Validator-corrected SQL contains unsafe operations")
+                    else:
+                        _logger.warning("Validator could not generate corrected SQL")
+                except Exception as validator_error:
+                    _logger.error(f"Error in validator correction: {validator_error}", exc_info=True)
             
             # If not a column error or correction failed, check if it's still column/field related
             is_column_error = "column" in error_str.lower() or "field" in error_str.lower() or "42S22" in error_str

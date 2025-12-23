@@ -50,7 +50,8 @@ class SQLValidatorAgent:
         self,
         sql_query: str,
         original_question: str,
-        schema_info: Optional[str] = None
+        schema_info: Optional[str] = None,
+        error_message: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Validates SQL query and attempts to correct it if it fails.
@@ -97,11 +98,13 @@ class SQLValidatorAgent:
             return {"valid": True, "corrected_sql": sql_query, "error": None, "attempts": 0}
         
         # If validation failed, ALWAYS try to correct using LLM
-        _logger.info(f"SQL validation failed: {schema_validation.get('error')}, attempting correction...")
+        # Use provided error_message if available (from execution), otherwise use schema validation error
+        error_msg = error_message if error_message else schema_validation.get('error', 'Unknown error')
+        _logger.info(f"SQL validation failed: {error_msg}, attempting correction...")
         if self._llm:
             correction_result = self._correct_sql_with_llm(
                 sql_query=sql_query,
-                error_message=schema_validation["error"],
+                error_message=error_msg,
                 original_question=original_question,
                 schema_info=schema_info
             )
@@ -137,47 +140,96 @@ class SQLValidatorAgent:
     
     def _detect_obvious_column_errors(self, sql: str) -> Optional[str]:
         """
-        Detect obvious column errors even if schema validation passes.
-        This catches common SQLMaker mistakes.
+        Detect obvious column errors using actual schema validation.
+        Completely generic - uses only database schema, no hardcoded values.
         """
-        sql_upper = sql.upper()
         errors = []
         
-        # Check for wrong table-column combinations
-        if "SUPER_LOAN_DIM" in sql_upper or "SLA" in sql_upper:
-            # Check if super_loan_dim (or alias sla) is used with columns it doesn't have
-            if re.search(r"(?:SUPER_LOAN_DIM|SLA)\.(?:TENURE|TENURE_MONTHS)", sql_upper):
-                errors.append("super_loan_dim does not have TENURE (use super_loan_account_dim)")
-            if re.search(r"(?:SUPER_LOAN_DIM|SLA)\.(?:INSTALTYPE|INTEREST_PAYMENT_STRUCTURE)", sql_upper):
-                errors.append("super_loan_dim does not have INSTALTYPE (use super_loan_account_dim)")
-            if re.search(r"(?:SUPER_LOAN_DIM|SLA)\.SCHEME_NAME", sql_upper):
-                errors.append("super_loan_dim does not have SCHEME_NAME (use SCHEME or caselite_loan_applications.SCHEME_NAME)")
-            if re.search(r"(?:SUPER_LOAN_DIM|SLA)\.PRODUCT(?!_ID)", sql_upper):
-                errors.append("super_loan_dim does not have PRODUCT (use PRODUCT_ID or caselite_loan_applications.PRODUCT)")
+        # Extract tables and columns from SQL
+        tables = self._extract_tables(sql)
+        columns_used = self._extract_columns(sql)
         
-        # Check for wrong column names
-        if "TENURE_MONTHS" in sql_upper:
-            errors.append("TENURE_MONTHS should be TENURE")
-        if "INTEREST_PAYMENT_STRUCTURE" in sql_upper:
-            errors.append("INTEREST_PAYMENT_STRUCTURE should be INSTALTYPE")
-        # Check for REKYC_DUE_DATE vs RE_KYC_DUE_DATE
-        if re.search(r"(SUPER_CUSTOMER_DIM|SCD)\.REKYC_DUE_DATE", sql_upper):
-            errors.append("super_customer_dim.REKYC_DUE_DATE should be RE_KYC_DUE_DATE (with underscore)")
-        if re.search(r"\bREKYC_DUE_DATE\b", sql_upper) and "SUPER_CUSTOMER_DIM" in sql_upper:
-            errors.append("REKYC_DUE_DATE should be RE_KYC_DUE_DATE in super_customer_dim (note: customer_non_individual_dim uses REKYC_DUE_DATE without underscore)")
+        # Check each column against actual schema
+        invalid_columns = []
+        for table, column in columns_used:
+            # Skip unknown table (will be handled by error message parsing)
+            if table == "unknown":
+                continue
+                
+            if not self._column_exists(table, column):
+                invalid_columns.append(f"{table}.{column}")
+                # Try to find similar column names in the same table
+                similar_columns = self._find_similar_columns(table, column)
+                if similar_columns:
+                    errors.append(f"{table} does not have {column}. Similar columns found: {', '.join(similar_columns)}")
         
-        # Check for unnecessary joins - if query uses super_loan_account_dim.SCHEME, don't need to join for SCHEME_NAME
-        if "SUPER_LOAN_ACCOUNT_DIM" in sql_upper and "CASELITE_LOAN_APPLICATIONS" in sql_upper:
-            # If query uses sla.SCHEME, it doesn't need to join for scheme
-            if re.search(r"SLA\.SCHEME", sql_upper) and re.search(r"CLA\.SCHEME_NAME", sql_upper):
-                errors.append("Query uses super_loan_account_dim.SCHEME - no need to join with caselite_loan_applications for SCHEME_NAME")
-            # If query only needs SCHEME, TENURE, INSTALTYPE, prefer direct query without join
-            if re.search(r"SLA\.(SCHEME|TENURE|INSTALTYPE)", sql_upper) and not re.search(r"CLA\.(STAGE_STATUS|APPLIED_DATE|APPROVED)", sql_upper):
-                if re.search(r"CLA\.PRODUCT", sql_upper):
-                    # Only warn if PRODUCT filter might be causing issues
-                    errors.append("Consider if PRODUCT='non-agricultural' filter is necessary - super_loan_account_dim.SCHEME='LRGMI' might already filter for gold loans")
+        if invalid_columns:
+            errors.append(f"Invalid columns detected: {', '.join(invalid_columns)}")
         
         return "; ".join(errors) if errors else None
+    
+    def _find_similar_columns(self, table_name: str, invalid_column: str, max_results: int = 5) -> list:
+        """Find similar column names in the table using actual schema - completely generic"""
+        try:
+            # Get all columns for the table
+            query = text("""
+                SELECT COLUMN_NAME
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = 'dbo'
+                  AND TABLE_NAME = :table_name
+                ORDER BY ORDINAL_POSITION
+            """)
+            
+            all_columns = self.db.execute(query, {
+                "table_name": table_name
+            }).fetchall()
+            
+            if not all_columns:
+                return []
+            
+            # Find similar columns using string matching
+            invalid_upper = invalid_column.upper()
+            similar = []
+            
+            for row in all_columns:
+                col_name = row[0].upper()
+                # Check for similarity
+                if invalid_upper in col_name or col_name in invalid_upper:
+                    # Exact match or contains
+                    priority = 1 if col_name == invalid_upper else 2
+                    similar.append((priority, row[0]))
+                elif self._column_name_similarity(invalid_upper, col_name) > 0.5:
+                    # Similar by edit distance
+                    priority = 3
+                    similar.append((priority, row[0]))
+            
+            # Sort by priority and return top results
+            similar.sort(key=lambda x: x[0])
+            return [col for _, col in similar[:max_results]]
+            
+        except Exception as e:
+            _logger.warning(f"Error finding similar columns for {table_name}.{invalid_column}: {e}")
+            return []
+    
+    def _column_name_similarity(self, col1: str, col2: str) -> float:
+        """Simple similarity check - returns 0.0 to 1.0"""
+        col1 = col1.upper()
+        col2 = col2.upper()
+        
+        # Exact match
+        if col1 == col2:
+            return 1.0
+        
+        # One contains the other
+        if col1 in col2 or col2 in col1:
+            return 0.8
+        
+        # Check common substrings
+        common_chars = set(col1) & set(col2)
+        if len(common_chars) > len(col1) * 0.5:
+            return 0.6
+        
+        return 0.0
     
     def _validate_sql_structure(self, sql: str) -> Dict[str, Any]:
         """Basic structural validation"""
@@ -214,6 +266,10 @@ class SQLValidatorAgent:
             # Check each column against actual schema
             invalid_columns = []
             for table, column in columns_used:
+                # Skip unknown table (will be handled by error message parsing)
+                if table == "unknown":
+                    continue
+                    
                 if not self._column_exists(table, column):
                     invalid_columns.append(f"{table}.{column}")
             
@@ -235,7 +291,18 @@ class SQLValidatorAgent:
                     col_match = re.search(r"Invalid column name '([^']+)'", error_str)
                     if col_match:
                         invalid_col = col_match.group(1)
-                        return {"valid": False, "error": f"Invalid column name: {invalid_col}"}
+                        # Try to find similar columns in the tables used
+                        tables_in_query = self._extract_tables(sql)
+                        suggestions = []
+                        for table in tables_in_query:
+                            similar = self._find_similar_columns(table, invalid_col, max_results=3)
+                            if similar:
+                                suggestions.append(f"{table}: {', '.join(similar)}")
+                        
+                        error_msg = f"Invalid column name: {invalid_col}"
+                        if suggestions:
+                            error_msg += f". Similar columns found: {'; '.join(suggestions)}"
+                        return {"valid": False, "error": error_msg}
                 return {"valid": False, "error": error_str}
         
         except Exception as e:
@@ -317,6 +384,28 @@ class SQLValidatorAgent:
             if prefix.upper() not in ["AS", "SELECT", "FROM", "WHERE", "JOIN", "ON", "AND", "OR", "GROUP", "ORDER", "HAVING"]:
                 columns.append((table, col))
         
+        # Also extract unqualified column names from WHERE clause (e.g., WHERE column_name = 'value')
+        # This catches cases where column is used without table prefix
+        where_pattern = re.compile(r"WHERE\s+(.+?)(?:\s+ORDER\s+BY|\s*$)", re.IGNORECASE | re.DOTALL)
+        where_match = where_pattern.search(sql)
+        if where_match:
+            where_clause = where_match.group(1)
+            # Extract column names that appear before =, <, >, etc. (unqualified)
+            unqualified_col_pattern = re.compile(r"\b([A-Z_][A-Z0-9_]*)\s*[=<>!]", re.IGNORECASE)
+            tables_found = self._extract_tables(sql)
+            for match in unqualified_col_pattern.finditer(where_clause):
+                col_name = match.group(1)
+                # Skip if this column was already captured with a table prefix
+                if not any(t == table and c.upper() == col_name.upper() for t, c in columns):
+                    # If we found tables in the query, try to match unqualified columns to those tables
+                    if tables_found:
+                        # For unqualified columns, check against all tables found
+                        for table in tables_found:
+                            columns.append((table, col_name))
+                    else:
+                        # If no tables found, still add it (will be validated later)
+                        columns.append(("unknown", col_name))
+        
         return columns
     
     def _column_exists(self, table_name: str, column_name: str) -> bool:
@@ -385,11 +474,14 @@ class SQLValidatorAgent:
         system_prompt = (
             "You are a SQL correction specialist. Your job is to fix SQL queries that have invalid column names.\n"
             "You MUST:\n"
-            "- Fix column names to match the actual database schema\n"
+            "- Fix column names to match the actual database schema provided\n"
             "- Return ONLY the corrected SQL query (no markdown, no explanations)\n"
             "- Use the exact column names from the schema information provided\n"
             "- Preserve the original query logic and structure\n"
             "- Use TOP (not LIMIT) for SQL Server\n"
+            "- If a column doesn't exist, find the most similar column from the actual schema\n"
+            "- If the error mentions a missing column, check the actual columns list and use the correct column name\n"
+            "- Make intelligent corrections based on column name similarity and context\n"
         )
         
         user_prompt_parts = [
@@ -405,48 +497,14 @@ class SQLValidatorAgent:
             user_prompt_parts.append(f"Schema information:\n{schema_info[:2000]}\n\n")
         
         user_prompt_parts.append(
-            "CRITICAL: Column name mappings and table locations:\n\n"
-            "Table: caselite_loan_applications (alias: cla)\n"
-            "- Has: SCHEME_NAME (correct column name)\n"
-            "- Has: PRODUCT (correct column name)\n"
-            "- Does NOT have: SCHEME, PRODUCT_ID, TENURE, INSTALTYPE\n\n"
-            "Table: super_loan_dim (alias: sld)\n"
-            "- Has: SCHEME (NOT SCHEME_NAME)\n"
-            "- Has: PRODUCT_ID (NOT PRODUCT)\n"
-            "- Does NOT have: TENURE, INSTALTYPE, SCHEME_NAME, PRODUCT\n\n"
-            "Table: super_loan_account_dim (alias: sla)\n"
-            "- Has: SCHEME (NOT SCHEME_NAME) - contains same values as caselite_loan_applications.SCHEME_NAME (e.g., 'LRGMI')\n"
-            "- Has: PRODUCT_ID (NOT PRODUCT)\n"
-            "- Has: TENURE (NOT TENURE_MONTHS)\n"
-            "- Has: INSTALTYPE (NOT INTEREST_PAYMENT_STRUCTURE)\n"
-            "- Does NOT have: SCHEME_NAME, PRODUCT\n\n"
-            "Table: super_customer_dim (alias: sc or scd)\n"
-            "- Has: RE_KYC_DUE_DATE (with underscore: RE_KYC_DUE_DATE, NOT REKYC_DUE_DATE)\n"
-            "- Does NOT have: REKYC_DUE_DATE (without underscore)\n\n"
-            "Table: customer_non_individual_dim\n"
-            "- Has: REKYC_DUE_DATE (without underscore: REKYC_DUE_DATE, NOT RE_KYC_DUE_DATE)\n"
-            "- Different from super_customer_dim which uses RE_KYC_DUE_DATE (with underscore)\n\n"
-            "Column corrections:\n"
-            "- TENURE_MONTHS -> TENURE (use super_loan_account_dim, NOT super_loan_dim)\n"
-            "- INTEREST_PAYMENT_STRUCTURE -> INSTALTYPE (use super_loan_account_dim, NOT super_loan_dim)\n"
-            "- REKYC_DUE_DATE -> RE_KYC_DUE_DATE (in super_customer_dim, use RE_KYC_DUE_DATE with underscore)\n"
-            "- Note: customer_non_individual_dim uses REKYC_DUE_DATE (without underscore), but super_customer_dim uses RE_KYC_DUE_DATE (with underscore)\n"
-            "- If using super_loan_dim or super_loan_account_dim: SCHEME_NAME -> SCHEME, PRODUCT -> PRODUCT_ID\n"
-            "- If using caselite_loan_applications: SCHEME_NAME and PRODUCT are correct\n"
-            "- MONTHLY -> 'monthly' (value for INSTALTYPE)\n\n"
-            "CRITICAL SIMPLIFICATION RULES:\n"
-            "1. PREFER querying super_loan_account_dim DIRECTLY for SCHEME, TENURE, INSTALTYPE\n"
-            "2. super_loan_account_dim.SCHEME has the same values as caselite_loan_applications.SCHEME_NAME (e.g., 'LRGMI')\n"
-            "3. If query mentions scheme code (like 'LRGMI') and tenure/installment, SIMPLIFY to:\n"
-            "   SELECT ACCNO, TENURE, SCHEME, INSTALTYPE FROM super_loan_account_dim WHERE SCHEME = 'LRGMI' AND TENURE < 14 AND INSTALTYPE = 'monthly'\n"
-            "4. ONLY join with caselite_loan_applications if query ABSOLUTELY requires:\n"
-            "   - PRODUCT='non-agricultural' or 'agricultural' (application-level filter)\n"
-            "   - STAGE_STATUS (application status like 'DISBURSED')\n"
-            "   - Application dates (APPLIED_DATE_LED, APPROVED_ON)\n"
-            "5. If query mentions 'product variant' but joining causes 0 results, REMOVE the join and PRODUCT filter\n"
-            "6. The join condition might not match all records - prefer direct query when possible\n\n"
-            "EXAMPLE: If current SQL joins but returns 0 results, simplify to:\n"
-            "SELECT ACCNO, NAME, TENURE, SCHEME, INSTALTYPE FROM super_loan_account_dim WHERE SCHEME = 'LRGMI' AND TENURE < 14 AND INSTALTYPE = 'monthly'\n\n"
+            "CRITICAL: Use ONLY the actual column names from the schema provided above.\n"
+            "If a column in the error message doesn't exist, find the most similar column name from the actual schema.\n"
+            "Match columns based on:\n"
+            "- Name similarity (e.g., 'invalid_col' might be 'valid_col' or 'similar_col')\n"
+            "- Context (e.g., if looking for status, find status-related columns)\n"
+            "- Data type (e.g., if filtering by date, use date columns)\n\n"
+            "Preserve the original query intent while using correct column names.\n"
+            "If a column doesn't exist and no similar column is found, remove that condition or use a different approach.\n\n"
             "Return ONLY the corrected SQL query:"
         )
         

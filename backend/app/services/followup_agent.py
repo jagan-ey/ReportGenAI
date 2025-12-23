@@ -130,15 +130,15 @@ class FollowUpAgentService:
             "   b) Multiple date columns exist AND the question doesn't explicitly mention a specific date field\n"
             "   c) The SQL might be using the wrong date column\n"
             "   DO NOT ask if:\n"
-            "   - The question explicitly mentions a specific date field (e.g., 'ReKYC due' → RE_KYC_DUE_DATE, 'account opened' → ACCT_OPN_DATE)\n"
+            "   - The question explicitly mentions a specific date field that matches a column name in the schema\n"
             "   - The SQL already uses the correct, unambiguous date column that matches the question's intent\n"
             "2) Data freshness risk: If the user's question is time/date-based (e.g., 'in the last 6 months', 'opened recently', 'current', 'latest') AND the freshness metadata shows lag_days exceeds the threshold (data is significantly stale), you MUST ask a freshness confirmation question. Include the exact max available date and lag days in the question.\n\n"
             "IMPORTANT:\n"
             "- Ask date-column question ONLY when: user question is date-based AND there is ACTUAL ambiguity (question doesn't specify which date field, or SQL might be using wrong column).\n"
             "- Do NOT ask date-column question when:\n"
             "  * User question is NOT date-based (e.g., tenure, amount, scheme filters only)\n"
-            "  * User question explicitly mentions a specific date field (e.g., 'ReKYC due', 'account opened date') AND SQL uses the correct matching column\n"
-            "  * The question clearly maps to one specific date column (e.g., 'ReKYC due' → RE_KYC_DUE_DATE, 'account opened' → ACCT_OPN_DATE)\n"
+            "  * User question explicitly mentions a specific date field that matches a column name AND SQL uses the correct matching column\n"
+            "  * The question clearly maps to one specific date column based on keyword matching with column names\n"
             "- Ask freshness question when: user question is time/date-based (contains phrases like 'in the last X months', 'opened', 'recent', 'current', 'latest', 'as of') AND freshness metadata is provided (only tables with lag_days exceeding threshold are included).\n"
             "- If freshness metadata is empty or not provided, do NOT ask freshness question (data is fresh or within acceptable threshold).\n"
             "- If you raise a freshness warning, ALWAYS include the exact max available date and the lag vs today (from the provided freshness metadata) in the question text.\n\n"
@@ -159,27 +159,27 @@ class FollowUpAgentService:
             "Few-shot examples:\n"
             "Example 1 (Ambiguous date question - ASK):\n"
             "Question: 'Show me all loans opened in the last 3 months'\n"
-            "SQL uses: ACCT_OPN_DATE\n"
-            "Available columns: ['ACCT_OPN_DATE', 'INSERTED_ON', 'LAST_UPDATED_TS']\n"
-            "→ ASK date_column question because question is vague ('opened' could mean ACCT_OPN_DATE or INSERTED_ON) and multiple columns exist.\n\n"
+            "SQL uses: OPENING_DATE\n"
+            "Available columns: ['OPENING_DATE', 'INSERTED_ON', 'LAST_UPDATED_TS'] (example columns)\n"
+            "→ ASK date_column question because question is vague ('opened' could mean OPENING_DATE or INSERTED_ON) and multiple columns exist.\n\n"
             "Example 1b (Explicit date field - DO NOT ASK):\n"
             "Question: 'Customers whose ReKYC due >6 months'\n"
-            "SQL uses: RE_KYC_DUE_DATE\n"
-            "Available columns: ['RE_KYC_DUE_DATE', 'INSERTED_ON', 'LAST_UPDATED_TS']\n"
-            "→ Do NOT ask date_column question because question explicitly mentions 'ReKYC due' which clearly maps to RE_KYC_DUE_DATE, and SQL already uses it correctly.\n\n"
+            "SQL uses: DUE_DATE (matches question keyword 'due')\n"
+            "Available columns: ['DUE_DATE', 'INSERTED_ON', 'LAST_UPDATED_TS'] (example - use actual columns from schema)\n"
+            "→ Do NOT ask date_column question because question explicitly mentions a keyword that matches the column name, and SQL already uses it correctly.\n\n"
             "Example 1c (Explicit date field - DO NOT ASK):\n"
             "Question: 'Show me accounts opened in the last 6 months'\n"
-            "SQL uses: ACCT_OPN_DATE\n"
-            "Available columns: ['ACCT_OPN_DATE', 'INSERTED_ON', 'LAST_UPDATED_TS']\n"
-            "→ Do NOT ask date_column question because 'accounts opened' clearly refers to ACCT_OPN_DATE (account opening date), and SQL already uses it correctly.\n\n"
+            "SQL uses: OPENING_DATE\n"
+            "Available columns: ['OPENING_DATE', 'INSERTED_ON', 'LAST_UPDATED_TS'] (example columns)\n"
+            "→ Do NOT ask date_column question because 'accounts opened' clearly refers to OPENING_DATE (account opening date), and SQL already uses it correctly.\n\n"
             "Example 2 (Non-date question):\n"
             "Question: 'Show me loans with tenure less than 12 months'\n"
             "SQL uses: TENURE (not a date column)\n"
-            "Available columns: ['ACCT_OPN_DATE', 'INSERTED_ON', 'LAST_UPDATED_TS']\n"
+            "Available columns: ['OPENING_DATE', 'INSERTED_ON', 'LAST_UPDATED_TS'] (example columns)\n"
             "→ Do NOT ask date_column question because user question is NOT date-based.\n\n"
             "Example 3 (Freshness warning - CRITICAL):\n"
             "Question: 'Show me all accounts opened in the last 6 months'\n"
-            "Freshness metadata: {'account_ca_dim': {'max_value': '2025-01-15 10:30:00', 'lag_days': 5, 'column': 'LAST_UPDATED_TS'}}\n"
+            "Freshness metadata: {'table_name': {'max_value': '2025-01-15 10:30:00', 'lag_days': 5, 'column': 'audit_column'}}\n"
             "→ MUST ASK freshness question because:\n"
             "  1. Question is time-based ('in the last 6 months')\n"
             "  2. lag_days = 5 (exceeds threshold, data is significantly stale)\n"
@@ -189,18 +189,18 @@ class FollowUpAgentService:
             "ID: 'data_freshness'\n\n"
             "Example 4 (Both date column AND freshness - but only if ambiguous):\n"
             "Question: 'Show me all accounts opened in the last 6 months'\n"
-            "SQL uses: ACCT_OPN_DATE\n"
-            "Available columns: ['ACCT_OPN_DATE', 'INSERTED_ON', 'LAST_UPDATED_TS']\n"
-            "Freshness metadata: {'account_ca_dim': {'max_value': '2025-01-15', 'lag_days': 5}}\n"
+            "SQL uses: OPENING_DATE\n"
+            "Available columns: ['OPENING_DATE', 'INSERTED_ON', 'LAST_UPDATED_TS'] (example columns)\n"
+            "Freshness metadata: {'table_name': {'max_value': '2025-01-15', 'lag_days': 5}}\n"
             "→ ASK ONLY freshness (NOT date column) because:\n"
-            "  1. Question mentions 'accounts opened' which clearly maps to ACCT_OPN_DATE, and SQL uses it correctly\n"
+            "  1. Question mentions 'accounts opened' which clearly maps to OPENING_DATE, and SQL uses it correctly\n"
             "  2. No ambiguity exists - DO NOT ask date column question\n"
             "  3. Freshness confirmation (lag_days = 5 > 0) - ASK this\n\n"
             "Example 4b (Ambiguous date + freshness - ASK BOTH):\n"
             "Question: 'Show me all records from the last 6 months'\n"
             "SQL uses: INSERTED_ON\n"
-            "Available columns: ['ACCT_OPN_DATE', 'INSERTED_ON', 'LAST_UPDATED_TS']\n"
-            "Freshness metadata: {'account_ca_dim': {'max_value': '2025-01-15', 'lag_days': 5}}\n"
+            "Available columns: ['OPENING_DATE', 'INSERTED_ON', 'LAST_UPDATED_TS'] (example columns)\n"
+            "Freshness metadata: {'table_name': {'max_value': '2025-01-15', 'lag_days': 5}}\n"
             "→ ASK BOTH:\n"
             "  1. Date column selection (question is vague - 'records' doesn't specify which date field)\n"
             "  2. Freshness confirmation (lag_days = 5 > 0)\n\n"
@@ -225,26 +225,29 @@ class FollowUpAgentService:
         date_cols_used: List[str],
         today: _dt.date,
     ) -> str:
-        # Add guidance about explicit date field mentions
-        explicit_date_mappings = {
-            "rekyc": ["RE_KYC_DUE_DATE", "REKYC_DUE_DATE"],
-            "re-kyc": ["RE_KYC_DUE_DATE", "REKYC_DUE_DATE"],
-            "kyc due": ["RE_KYC_DUE_DATE", "REKYC_DUE_DATE"],
-            "account opened": ["ACCT_OPN_DATE"],
-            "opened date": ["ACCT_OPN_DATE"],
-            "opening date": ["ACCT_OPN_DATE"],
-            "loan opened": ["ACCT_OPN_DATE"],
-            "application date": ["APP_DATE", "APPLICATION_DATE"],
-            "disbursement date": ["DISBURSEMENT_DATE", "DISB_DATE"],
-        }
-        
-        # Check if question explicitly mentions a date field
+        # Dynamically find date columns that match question keywords
+        # Instead of hardcoded mappings, we'll use the actual date columns from tables
         question_lower = question.lower()
         explicit_date_field = None
-        for keyword, columns in explicit_date_mappings.items():
-            if keyword in question_lower:
-                explicit_date_field = columns[0]  # Use first match
+        
+        # Look for date columns in the tables that match question keywords
+        # This is generic - works for any date columns, not just hardcoded ones
+        for table, date_cols in table_date_cols.items():
+            for col in date_cols:
+                col_lower = col.lower()
+                # Check if column name contains keywords from question
+                # Generic matching: if question mentions something that matches column name pattern
+                if any(keyword in col_lower for keyword in question_lower.split() if len(keyword) > 3):
+                    # Found a potential match - use it
+                    explicit_date_field = col
+                    break
+            if explicit_date_field:
                 break
+        
+        # If no match found, check if SQL already uses a date column that seems relevant
+        if not explicit_date_field and date_cols_used:
+            # Use the first date column that's already in the SQL
+            explicit_date_field = date_cols_used[0]
         
         payload = {
             "question": question,
@@ -256,8 +259,8 @@ class FollowUpAgentService:
             "today": str(today),
             "explicit_date_field_mentioned": explicit_date_field,  # Add this hint
             "guidance": (
-                "If the question explicitly mentions a specific date field (e.g., 'ReKYC due' → RE_KYC_DUE_DATE, "
-                "'account opened' → ACCT_OPN_DATE) AND the SQL already uses that correct column, "
+                "If the question explicitly mentions a specific date field that matches a column name "
+                "AND the SQL already uses that correct column, "
                 "DO NOT ask for date column selection - there is no ambiguity."
             ) if explicit_date_field else None,
         }
@@ -304,8 +307,11 @@ class FollowUpAgentService:
         """
         Returns:
           - date columns per table (ordered)
-          - freshness per table (best effort max(LAST_UPDATED_TS/INSERTED_ON/other date columns))
+          - freshness per table (best effort max(audit columns/other date columns))
         """
+        # Get audit column names from config (generic, not hardcoded)
+        audit_columns = [col.strip().upper() for col in settings.AUDIT_COLUMNS.split(",") if col.strip()]
+        
         date_cols: Dict[str, List[str]] = {}
         freshness: Dict[str, Dict[str, Any]] = {}
 
@@ -337,20 +343,19 @@ class FollowUpAgentService:
             # Sort with audit columns last (so user sees business dates first)
             candidates_sorted = sorted(
                 set(candidates),
-                key=lambda x: (x.upper() in ("INSERTED_ON", "LAST_UPDATED_TS"), x.upper()),
+                key=lambda x: (x.upper() in audit_columns, x.upper()),
             )
             if candidates_sorted:
                 date_cols[t] = candidates_sorted
 
-            # Freshness: prefer LAST_UPDATED_TS then INSERTED_ON.
-            # If those are NULL/unavailable, fall back to max across other date columns (business dates).
+            # Freshness: prefer audit columns (configurable), then fall back to business date columns
             preferred_cols = []
-            for preferred in ("LAST_UPDATED_TS", "INSERTED_ON"):
+            for preferred in audit_columns:
                 if any((c.upper() == preferred) for c, _ in cols):
                     preferred_cols.append(preferred)
 
             # Business date candidates (exclude audit columns)
-            business_date_cols = [c for c in candidates_sorted if c.upper() not in ("INSERTED_ON", "LAST_UPDATED_TS")]
+            business_date_cols = [c for c in candidates_sorted if c.upper() not in audit_columns]
 
             def _try_max(colname: str):
                 max_q = text(f"SELECT MAX([{colname}]) AS max_val FROM dbo.[{t}]")

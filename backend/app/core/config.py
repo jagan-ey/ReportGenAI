@@ -58,6 +58,28 @@ class Settings(BaseSettings):
     # Only ask about data freshness if lag_days exceeds this threshold
     DATA_FRESHNESS_THRESHOLD_DAYS: int = 3  # Default: 3 days
     
+    # Vector Knowledge Base Configuration
+    VECTOR_DB_PATH: str = "backend/data/vector_db"  # Path to ChromaDB storage
+    KNOWLEDGE_BASE_COLLECTION: str = "ccm_knowledge_base"  # ChromaDB collection name
+    EMBEDDING_MODEL: str = "text-embedding-ada-002"  # Azure OpenAI embedding model
+    EMBEDDING_DEPLOYMENT: str = "text-embedding-ada-002"  # Azure OpenAI embedding deployment
+    KNOWLEDGE_CHUNK_SIZE: int = 1000  # Characters per chunk
+    KNOWLEDGE_CHUNK_OVERLAP: int = 200  # Overlap between chunks
+    MAX_RETRIEVAL_RESULTS: int = 5  # Max number of knowledge chunks to retrieve
+    
+    # Knowledge Base Document Paths
+    BUSINESS_DOCS_PATH: str = "backend/data/business_docs"  # Path to business documents
+    
+    # SQL Agent Configuration
+    # Comma-separated list of allowed tables for SQL agent (empty = all tables)
+    # Example: "table1,table2,table3" or "" for all tables
+    SQL_AGENT_ALLOWED_TABLES: str = ""  # Empty = allow all tables, or specify comma-separated list
+    
+    # Audit Column Names (for data freshness checks)
+    # These are common audit column names used across tables
+    # Comma-separated list, checked in order of preference
+    AUDIT_COLUMNS: str = "LAST_UPDATED_TS,INSERTED_ON,UPDATED_DATE,CREATED_DATE,MODIFIED_DATE"  # Common audit column names
+    
     class Config:
         env_file = ".env"
         case_sensitive = True

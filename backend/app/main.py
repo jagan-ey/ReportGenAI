@@ -8,7 +8,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from contextlib import asynccontextmanager
 import uvicorn
 
-from app.api import chat, queries, health, reports, auth
+from app.api import chat, health, reports, auth
 from app.core.config import settings
 from app.core.database import get_engine
 from app.database.schema import Base
@@ -88,7 +88,6 @@ app.add_middleware(
 app.include_router(health.router, prefix="/api", tags=["Health"])
 app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
 app.include_router(chat.router, prefix="/api/chat", tags=["Chat"])
-app.include_router(queries.router, prefix="/api/queries", tags=["Queries"])
 app.include_router(reports.router, prefix="/api/reports", tags=["Reports"])
 
 

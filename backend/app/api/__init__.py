@@ -1,4 +1,4 @@
-from . import chat, queries, health, reports, auth
+from . import chat, health, reports, auth
 
-__all__ = ["chat", "queries", "health", "reports", "auth"]
+__all__ = ["chat", "health", "reports", "auth"]
 

@@ -13,6 +13,10 @@ from app.services.predefined_queries_db import create_predefined_query, get_all_
 from datetime import datetime, timedelta
 import json
 import re
+import logging
+import traceback
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -83,9 +87,9 @@ async def send_for_approval(
         # Generate approval ID
         approval_id = f"APPROVAL-{datetime.now().strftime('%Y%m%d%H%M%S')}"
         
-        print(f"DEBUG: Creating approval request: {approval_id}")
-        print(f"DEBUG: Requested by: {current_user['username']}")
-        print(f"DEBUG: Approver email: {request.approver_email}")
+        logger.debug(f"Creating approval request: {approval_id}")
+        logger.debug(f"Requested by: {current_user['username']}")
+        logger.debug(f"Approver email: {request.approver_email}")
         
         # Store approval request in database
         approval_record = ApprovalRequestModel(
@@ -104,7 +108,7 @@ async def send_for_approval(
         db.commit()
         db.refresh(approval_record)
         
-        print(f"DEBUG: Approval request saved successfully: {approval_id}")
+        logger.debug(f"Approval request saved successfully: {approval_id}")
         
         # In production, this would also:
         # 1. Send email notification to approver
@@ -123,9 +127,7 @@ async def send_for_approval(
         }
     except Exception as e:
         db.rollback()
-        import traceback
-        print(f"ERROR creating approval: {str(e)}")
-        print(traceback.format_exc())
+        logger.error(f"Error creating approval: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error sending for approval: {str(e)}")
 
 
@@ -302,9 +304,7 @@ async def list_approvers(
             "count": len(approvers)
         }
     except Exception as e:
-        import traceback
-        print(f"ERROR fetching approvers: {str(e)}")
-        print(traceback.format_exc())
+        logger.error(f"Error fetching approvers: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error fetching approvers: {str(e)}")
 
 
@@ -320,16 +320,12 @@ async def list_approvals(
     - If user is approver: shows all requests (pending by default)
     """
     try:
-        # Debug logging
-        print(f"DEBUG: Current user: {current_user}")
-        print(f"DEBUG: User role: {current_user.get('role')}")
-        print(f"DEBUG: Status filter: {status}")
+        logger.debug(f"Current user: {current_user}, role: {current_user.get('role')}, status filter: {status}")
         
         query = db.query(ApprovalRequestModel)
         
         # Filter by user role
         user_role = current_user.get("role", "user")
-        print(f"DEBUG: User role determined: {user_role}")
         
         if user_role == "approver" or user_role == "admin":
             # Approvers see all requests (optionally filtered by status)
@@ -347,9 +343,7 @@ async def list_approvals(
         
         approvals = query.order_by(ApprovalRequestModel.CREATED_DATE.desc()).all()
         
-        print(f"DEBUG: Found {len(approvals)} approvals")
-        for approval in approvals:
-            print(f"DEBUG: Approval - ID: {approval.REQUEST_ID}, Status: {approval.STATUS}, Requested by: {approval.REQUESTED_BY}")
+        logger.debug(f"Found {len(approvals)} approvals")
         
         return {
             "approvals": [
@@ -370,9 +364,7 @@ async def list_approvals(
             "count": len(approvals)
         }
     except Exception as e:
-        import traceback
-        print(f"ERROR: {str(e)}")
-        print(traceback.format_exc())
+        logger.error(f"Error fetching approvals: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error fetching approvals: {str(e)}")
 
 
@@ -467,19 +459,12 @@ async def approve_request(
             )
             
             added_to_predefined = True
-            print(f"✅ Added approved query to predefined queries: {query_key}")
-            print(f"   Question: {approval.QUESTION[:100]}")
-            print(f"   SQL length: {len(approval.QUERY)} chars")
+            logger.info(f"Added approved query to predefined queries: {query_key}, Question: {approval.QUESTION[:100]}, SQL length: {len(approval.QUERY)} chars")
             
         except Exception as e:
             # Log error but don't fail the approval
-            import traceback
             error_msg = str(e)
-            print(f"⚠️ ERROR: Failed to add query to predefined queries: {error_msg}")
-            print(f"   Approval ID: {approval_id}")
-            print(f"   Question: {approval.QUESTION if approval.QUESTION else 'None'}")
-            print(f"   Query length: {len(approval.QUERY) if approval.QUERY else 0} chars")
-            print(traceback.format_exc())
+            logger.warning(f"Failed to add query to predefined queries: {error_msg}, Approval ID: {approval_id}, Question: {approval.QUESTION if approval.QUESTION else 'None'}, Query length: {len(approval.QUERY) if approval.QUERY else 0} chars", exc_info=True)
             # Continue with approval even if adding to predefined queries fails
         
         # Commit approval status change

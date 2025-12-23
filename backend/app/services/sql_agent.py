@@ -103,25 +103,26 @@ class SQLAgentService:
             # Import langchain modules
             create_sql_agent, SQLDatabaseToolkit, SQLDatabase, AzureChatOpenAI, AgentType = _import_langchain()
             
-            # Initialize database connection - RESTRICTED to only the 8 BIU Star Schema tables
-            # This ensures the agent only queries the intended tables, not all tables in the database
-            allowed_tables = [
-                'super_customer_dim',
-                'customer_non_individual_dim',
-                'account_ca_dim',
-                'super_loan_dim',
-                'super_loan_account_dim',
-                'caselite_loan_applications',
-                'gold_collateral_dim',
-                'custom_freeze_details_dim'
-            ]
+            # Initialize database connection
+            # Get allowed tables from config or use all tables
+            allowed_tables = None
+            if settings.SQL_AGENT_ALLOWED_TABLES:
+                # Parse comma-separated list from config
+                allowed_tables = [t.strip() for t in settings.SQL_AGENT_ALLOWED_TABLES.split(",") if t.strip()]
+                _sql_agent_logger.info(f"SQL Agent restricted to {len(allowed_tables)} tables from config")
+            else:
+                # No restriction - allow all tables (generic)
+                _sql_agent_logger.info("SQL Agent allowed to access all tables (no restriction)")
             
-            # Use include_tables to restrict access to only these 8 tables
-            self._db = SQLDatabase.from_uri(
-                self.db_url,
-                include_tables=allowed_tables,
-                sample_rows_in_table_info=3  # Include sample rows for better context
-            )
+            # Use include_tables only if specified, otherwise allow all tables
+            db_kwargs = {
+                "uri": self.db_url,
+                "sample_rows_in_table_info": 3  # Include sample rows for better context
+            }
+            if allowed_tables:
+                db_kwargs["include_tables"] = allowed_tables
+            
+            self._db = SQLDatabase.from_uri(**db_kwargs)
 
             # Ensure any SQL executed through LangChain tools is cleaned (strip ```sql fences)
             # This prevents SQL Server errors like "Incorrect syntax near '`'" when models wrap SQL in markdown.
@@ -144,7 +145,10 @@ class SQLAgentService:
             except Exception as e:
                 _sql_agent_logger.debug(f"Could not patch SQLDatabase.run cleaners: {e}")
             
-            _sql_agent_logger.info(f"✅ SQL Database initialized with restricted access to {len(allowed_tables)} tables: {', '.join(allowed_tables)}")
+            if allowed_tables:
+                _sql_agent_logger.info(f"✅ SQL Database initialized with restricted access to {len(allowed_tables)} tables: {', '.join(allowed_tables)}")
+            else:
+                _sql_agent_logger.info("✅ SQL Database initialized with access to all tables")
             
             # Use Azure OpenAI - with better error handling
             try:

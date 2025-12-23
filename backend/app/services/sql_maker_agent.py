@@ -12,7 +12,7 @@ import json
 
 from app.core.config import settings
 from app.services.sql_agent import SQLAgentService
-from app.services.knowledge_base import get_knowledge_base
+from app.services.vector_knowledge_base import get_vector_knowledge_base
 
 _logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ class SQLMakerAgent:
         self.db_url = db_url
         self._llm = None
         self._schema_provider = SQLAgentService(db_url)
-        self._knowledge_base = get_knowledge_base()
+        self._knowledge_base = None  # Lazy initialization - only create when needed
         self._initialized = False
 
     def _ensure_initialized(self):
@@ -64,9 +64,53 @@ class SQLMakerAgent:
             schema_info = ""
             _logger.warning(f"SQLMaker could not load schema info: {e}")
 
-        # Get domain knowledge context from RAG knowledge base
+        # Get domain knowledge context from vector knowledge base (lazy initialization)
+        domain_knowledge = None
         try:
-            domain_knowledge = self._knowledge_base.get_context_for_sql_generation(question)
+            # Lazy initialize vector KB only when needed
+            if self._knowledge_base is None:
+                try:
+                    self._knowledge_base = get_vector_knowledge_base()
+                except Exception as e:
+                    _logger.debug(f"Vector KB not available: {e}. Continuing without it.")
+                    self._knowledge_base = None
+            
+            # Only try to use vector KB if it's actually initialized and working
+            if (self._knowledge_base and 
+                hasattr(self._knowledge_base, '_initialized') and 
+                self._knowledge_base._initialized and
+                hasattr(self._knowledge_base, 'collection') and
+                self._knowledge_base.collection is not None):
+                
+                # Extract table names from question dynamically
+                # Use schema helper to get all tables, then check which ones are mentioned
+                question_lower = question.lower()
+                mentioned_tables = []
+                try:
+                    from app.services.schema_helper import get_tables_from_sql, get_all_tables
+                    from app.core.database import get_engine
+                    
+                    # Get all tables from database dynamically
+                    engine = get_engine()
+                    all_tables = get_all_tables(engine)
+                    
+                    # Check which tables are mentioned in the question
+                    for table in all_tables:
+                        if table.lower() in question_lower:
+                            mentioned_tables.append(table)
+                except Exception as e:
+                    _logger.debug(f"Could not get tables dynamically: {e}. Continuing without table filtering.")
+                    mentioned_tables = None
+                
+                # Get relevant knowledge from vector DB
+                domain_knowledge = self._knowledge_base.get_relevant_knowledge(
+                    question=question,
+                    table_names=mentioned_tables if mentioned_tables else None,
+                    knowledge_types=['column_definition', 'table_schema', 'data_patterns', 'business_rule']
+                )
+        except Exception as e:
+            _logger.debug(f"Could not retrieve knowledge from vector KB: {e}. Continuing without it.")
+            domain_knowledge = None
         except Exception as e:
             domain_knowledge = ""
             _logger.warning(f"SQLMaker could not load domain knowledge: {e}")
@@ -145,45 +189,27 @@ class SQLMakerAgent:
                 "6. DO NOT change table names, column names, or query structure.\n"
                 "7. DO NOT regenerate the query from scratch - you are MODIFYING, not creating.\n\n"
                 "Example:\n"
-                "Previous SQL: SELECT cla.APP_ID, cla.TENURE FROM caselite_loan_applications cla WHERE cla.TENURE > 12\n"
-                "New question: 'Tenure > 15'\n"
-                "Modified SQL: SELECT cla.APP_ID, cla.TENURE FROM caselite_loan_applications cla WHERE cla.TENURE > 15\n"
+                "Previous SQL: SELECT t1.col1, t1.col2 FROM table1 t1 WHERE t1.col2 > 12\n"
+                "New question: 'col2 > 15'\n"
+                "Modified SQL: SELECT t1.col1, t1.col2 FROM table1 t1 WHERE t1.col2 > 15\n"
                 "(ONLY the number changed, everything else is identical)\n\n"
                 "STANDARD SQL GENERATION RULES (if previous SQL is not related or not provided):\n"
                 "- Only generate a single SQL SELECT statement.\n"
-                "- Use ONLY these 8 tables: super_customer_dim, customer_non_individual_dim, account_ca_dim, "
-                "super_loan_dim, super_loan_account_dim, caselite_loan_applications, gold_collateral_dim, "
-                "custom_freeze_details_dim.\n"
+                "- Use ONLY the tables available in the database schema provided.\n"
                 "- Do NOT use markdown fences (no ```).\n"
                 "- Do NOT use backticks.\n"
                 "- Do NOT include explanations.\n"
                 "- Use TOP (not LIMIT).\n"
                 "- Prefer explicit column lists (avoid SELECT * unless truly necessary).\n"
-                "- INCLUDE USEFUL COLUMNS for reporting: When querying customers, include CUST_NAME, CLEAN_MOBILE, PRIMARY_SOL_ID, STATE, CITY along with CUST_ID.\n"
-                "- When querying loans, include NAME, PRODUCT_ID, SCHEME, BALANCE, ACCT_OPN_DATE along with ACCNO.\n"
-                "- When querying accounts, include ACCT_NAME, SCHEME_CODE, BALANCE, SANCT_LIM along with ACCT_NUM.\n"
                 "- Include contextually relevant columns that would be useful in a business report.\n"
-                "- Use the domain knowledge provided to understand valid values, business meanings, and relationships.\n"
-                "- If the request mentions codes or schemes (like LRGMI, SGL, etc.), use the exact values from domain knowledge.\n"
+                "- Use the domain knowledge and schema information provided to understand valid values, business meanings, and relationships.\n"
+                "- Use exact column names from the schema - do not guess or use aliases that don't exist.\n"
                 "- If the request is ambiguous, make a reasonable assumption and still produce SQL.\n\n"
-                "CRITICAL TABLE-COLUMN MAPPINGS:\n"
-                "- TENURE: ONLY in super_loan_account_dim (NOT in super_loan_dim)\n"
-                "- INSTALTYPE: ONLY in super_loan_account_dim (NOT in super_loan_dim, NOT 'INTEREST_PAYMENT_STRUCTURE')\n"
-                "- RE_KYC_DUE_DATE: In super_customer_dim (with underscore: RE_KYC_DUE_DATE, NOT REKYC_DUE_DATE)\n"
-                "- REKYC_DUE_DATE: In customer_non_individual_dim (without underscore: REKYC_DUE_DATE, NOT RE_KYC_DUE_DATE)\n"
-                "- SCHEME: In super_loan_dim and super_loan_account_dim (contains scheme codes like 'LRGMI', 'SGL', 'MGL')\n"
-                "- SCHEME_NAME: In caselite_loan_applications (same values as SCHEME, but different column name)\n"
-                "- PRODUCT: ONLY in caselite_loan_applications (values: 'non-agricultural', 'agricultural', 'commercial')\n"
-                "- PRODUCT_ID: In super_loan_dim and super_loan_account_dim (values: 'Gold Loan', 'Tractor', etc.)\n\n"
                 "IMPORTANT QUERYING RULES:\n"
-                "- PREFER querying super_loan_account_dim directly for SCHEME, TENURE, INSTALTYPE\n"
-                "- Only join with caselite_loan_applications if query needs:\n"
-                "  * PRODUCT='non-agricultural' or 'agricultural' (not PRODUCT_ID)\n"
-                "  * STAGE_STATUS (application status)\n"
-                "  * Application dates\n"
-                "- If query only mentions scheme code (like 'LRGMI'), use super_loan_account_dim.SCHEME directly - NO JOIN needed\n"
-                "- If query mentions 'product variant' or 'non-agricultural', then join with caselite_loan_applications\n"
-                "- Join condition: super_loan_account_dim.ACCNO = caselite_loan_applications.FIN_LOAN_ACCOUNT_NUMBER\n"
+                "- Use the schema information to determine which tables and columns to use.\n"
+                "- Only join tables when necessary - prefer direct queries when possible.\n"
+                "- Use domain knowledge to understand relationships between tables.\n"
+                "- Match column names exactly as they appear in the schema.\n"
             )
         else:
             # Original system prompt when no previous SQL
@@ -191,39 +217,21 @@ class SQLMakerAgent:
                 "You are SQLMaker, a specialist at writing SQL Server (T-SQL) SELECT queries.\n"
                 "You MUST follow these rules:\n"
                 "- Only generate a single SQL SELECT statement.\n"
-                "- Use ONLY these 8 tables: super_customer_dim, customer_non_individual_dim, account_ca_dim, "
-                "super_loan_dim, super_loan_account_dim, caselite_loan_applications, gold_collateral_dim, "
-                "custom_freeze_details_dim.\n"
+                "- Use ONLY the tables available in the database schema provided.\n"
                 "- Do NOT use markdown fences (no ```).\n"
                 "- Do NOT use backticks.\n"
                 "- Do NOT include explanations.\n"
                 "- Use TOP (not LIMIT).\n"
                 "- Prefer explicit column lists (avoid SELECT * unless truly necessary).\n"
-                "- INCLUDE USEFUL COLUMNS for reporting: When querying customers, include CUST_NAME, CLEAN_MOBILE, PRIMARY_SOL_ID, STATE, CITY along with CUST_ID.\n"
-                "- When querying loans, include NAME, PRODUCT_ID, SCHEME, BALANCE, ACCT_OPN_DATE along with ACCNO.\n"
-                "- When querying accounts, include ACCT_NAME, SCHEME_CODE, BALANCE, SANCT_LIM along with ACCT_NUM.\n"
                 "- Include contextually relevant columns that would be useful in a business report.\n"
-                "- Use the domain knowledge provided to understand valid values, business meanings, and relationships.\n"
-                "- If the request mentions codes or schemes (like LRGMI, SGL, etc.), use the exact values from domain knowledge.\n"
+                "- Use the domain knowledge and schema information provided to understand valid values, business meanings, and relationships.\n"
+                "- Use exact column names from the schema - do not guess or use aliases that don't exist.\n"
                 "- If the request is ambiguous, make a reasonable assumption and still produce SQL.\n\n"
-                "CRITICAL TABLE-COLUMN MAPPINGS:\n"
-                "- TENURE: ONLY in super_loan_account_dim (NOT in super_loan_dim)\n"
-                "- INSTALTYPE: ONLY in super_loan_account_dim (NOT in super_loan_dim, NOT 'INTEREST_PAYMENT_STRUCTURE')\n"
-                "- RE_KYC_DUE_DATE: In super_customer_dim (with underscore: RE_KYC_DUE_DATE, NOT REKYC_DUE_DATE)\n"
-                "- REKYC_DUE_DATE: In customer_non_individual_dim (without underscore: REKYC_DUE_DATE, NOT RE_KYC_DUE_DATE)\n"
-                "- SCHEME: In super_loan_dim and super_loan_account_dim (contains scheme codes like 'LRGMI', 'SGL', 'MGL')\n"
-                "- SCHEME_NAME: In caselite_loan_applications (same values as SCHEME, but different column name)\n"
-                "- PRODUCT: ONLY in caselite_loan_applications (values: 'non-agricultural', 'agricultural', 'commercial')\n"
-                "- PRODUCT_ID: In super_loan_dim and super_loan_account_dim (values: 'Gold Loan', 'Tractor', etc.)\n\n"
                 "IMPORTANT QUERYING RULES:\n"
-                "- PREFER querying super_loan_account_dim directly for SCHEME, TENURE, INSTALTYPE\n"
-                "- Only join with caselite_loan_applications if query needs:\n"
-                "  * PRODUCT='non-agricultural' or 'agricultural' (not PRODUCT_ID)\n"
-                "  * STAGE_STATUS (application status)\n"
-                "  * Application dates\n"
-                "- If query only mentions scheme code (like 'LRGMI'), use super_loan_account_dim.SCHEME directly - NO JOIN needed\n"
-                "- If query mentions 'product variant' or 'non-agricultural', then join with caselite_loan_applications\n"
-                "- Join condition: super_loan_account_dim.ACCNO = caselite_loan_applications.FIN_LOAN_ACCOUNT_NUMBER\n"
+                "- Use the schema information to determine which tables and columns to use.\n"
+                "- Only join tables when necessary - prefer direct queries when possible.\n"
+                "- Use domain knowledge to understand relationships between tables.\n"
+                "- Match column names exactly as they appear in the schema.\n"
             )
 
         # Build user prompt with schema + domain knowledge
@@ -331,10 +339,10 @@ class SQLMakerAgent:
             "Your previous SQL draft was rejected. Fix it.\n",
             "You MUST return ONLY a single valid SQL Server SELECT query.\n",
             "Constraints:\n",
-            "- Only the 8 allowed tables.\n",
+            "- Only use tables from the provided schema.\n",
             "- No markdown, no backticks, no explanations.\n",
             "- Use TOP not LIMIT.\n",
-            "- Use exact valid values from domain knowledge (e.g., 'LRGMI' not 'LRGMI Scheme').\n\n",
+            "- Use exact valid values from domain knowledge.\n\n",
             f"User question:\n{question}\n\n"
         ]
         

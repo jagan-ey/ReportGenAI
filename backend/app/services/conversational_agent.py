@@ -145,7 +145,7 @@ class ConversationalAgent:
 You help users understand the system, answer questions about the database schema, and guide them on how to use the platform.
 
 Key Information:
-- The platform has access to 8 BIU Star Schema tables: super_customer_dim, customer_non_individual_dim, account_ca_dim, super_loan_dim, super_loan_account_dim, caselite_loan_applications, gold_collateral_dim, custom_freeze_details_dim
+- The platform has access to database tables as defined in the schema
 - Users can ask questions in natural language to query data
 - There are predefined queries available in the sidebar for 100% accuracy
 - The platform supports report download, approval workflows, and scheduling
@@ -171,12 +171,12 @@ Behavior for follow-up/meta questions:
 
 Examples:
 User: "from which table we got this data?"
-Context: Source tables used in the previous SQL: - account_ca_dim
-Assistant: "The data came from the table account_ca_dim."
+Context: Source tables used in the previous SQL: - table_name
+Assistant: "The data came from the table table_name."
 
 User: "are the data from this table fresh or old?"
-Context: Freshness metadata (computed from database): - caselite_loan_applications: max(LAST_UPDATED_TS)=2025-11-30 10:05:00 (lag_days=16)
-Assistant: "The latest update in caselite_loan_applications is 2025-11-30 (16 days behind today). The data is older; confirm if you want to proceed."
+Context: Freshness metadata (computed from database): - table_name: max(audit_column)=2025-11-30 10:05:00 (lag_days=16)
+Assistant: "The latest update in table_name is 2025-11-30 (16 days behind today). The data is older; confirm if you want to proceed."
 """
         
         prior_sql_context = ""
@@ -244,7 +244,7 @@ Please provide a helpful, natural response to this question. Be concise but info
     def _compute_freshness(self, tables: list) -> Dict[str, Dict[str, Any]]:
         """
         Compute per-table freshness using real DB values.
-        Prefers LAST_UPDATED_TS, then INSERTED_ON, else best max across other date-like columns.
+        Prefers audit columns (configurable via AUDIT_COLUMNS setting), else best max across other date-like columns.
         Returns dict: { table: {column, max_value, lag_days} }
         """
         if not self._engine or not tables:
@@ -291,12 +291,16 @@ Please provide a helpful, natural response to this question. Be concise but info
                     if dt in date_types or name.endswith("_DT") or name.endswith("_DATE") or "DATE" in name:
                         candidates.append(c)
 
+                # Get audit column names from config (generic, not hardcoded)
+                audit_columns = [col.strip().upper() for col in settings.AUDIT_COLUMNS.split(",") if col.strip()]
+                
                 preferred = []
-                for c in ("LAST_UPDATED_TS", "INSERTED_ON"):
+                for c in audit_columns:
                     if any(colname.upper() == c for colname, _ in cols):
                         preferred.append(c)
 
-                business = [c for c in sorted(set(candidates)) if c.upper() not in ("LAST_UPDATED_TS", "INSERTED_ON")]
+                # Business date columns are those that aren't audit columns
+                business = [c for c in sorted(set(candidates)) if c.upper() not in audit_columns]
 
                 chosen_col = None
                 max_val = None

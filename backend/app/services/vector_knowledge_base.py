@@ -1,0 +1,339 @@
+"""
+Vector Database-based Knowledge Base Service
+
+Uses ChromaDB to store and retrieve domain knowledge with semantic search.
+Replaces the hardcoded knowledge_base.py with an intelligent, LLM-enhanced system.
+"""
+
+from typing import List, Dict, Optional, Any
+import logging
+
+_logger = logging.getLogger(__name__)
+
+# Lazy imports to avoid startup errors if dependencies aren't installed
+_chromadb = None
+_SentenceTransformer = None
+
+def _import_chromadb():
+    global _chromadb
+    if _chromadb is None:
+        try:
+            import chromadb
+            from chromadb.config import Settings
+            _chromadb = {'chromadb': chromadb, 'Settings': Settings}
+        except ImportError as e:
+            _logger.warning(f"ChromaDB not available: {e}")
+            _chromadb = False
+    return _chromadb
+
+def _import_sentence_transformers():
+    global _SentenceTransformer
+    if _SentenceTransformer is None:
+        try:
+            # Try to import with compatibility fix for huggingface_hub
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                from sentence_transformers import SentenceTransformer
+                _SentenceTransformer = SentenceTransformer
+        except ImportError as e:
+            _logger.warning(f"SentenceTransformers not available: {e}")
+            _logger.warning("Try: pip install --upgrade sentence-transformers huggingface-hub")
+            _SentenceTransformer = False
+        except Exception as e:
+            _logger.warning(f"SentenceTransformers import error: {e}")
+            _logger.warning("Try: pip install --upgrade sentence-transformers huggingface-hub")
+            _SentenceTransformer = False
+    return _SentenceTransformer
+
+
+class VectorKnowledgeBase:
+    """
+    Vector database-based knowledge base using ChromaDB.
+    Stores schema information, business rules, column definitions, and document knowledge.
+    """
+    
+    def __init__(self, persist_directory: str = "./chroma_db"):
+        """
+        Initialize vector knowledge base
+        
+        Args:
+            persist_directory: Directory to persist ChromaDB data
+        """
+        self.persist_directory = persist_directory
+        self.client = None
+        self.collection = None
+        self.embedding_model = None
+        self._initialized = False
+        self._init_attempted = False  # Track if we've attempted initialization
+        
+    def _ensure_initialized(self):
+        """Lazy initialization of ChromaDB and embedding model - non-blocking"""
+        # If already attempted (successfully or not), don't try again
+        if hasattr(self, '_init_attempted'):
+            return
+        self._init_attempted = True
+        
+        try:
+            # Import dependencies
+            chromadb_import = _import_chromadb()
+            if chromadb_import is False:
+                _logger.debug("ChromaDB not available. Vector knowledge base disabled.")
+                self._initialized = False
+                return
+            
+            chromadb = chromadb_import['chromadb']
+            Settings = chromadb_import['Settings']
+            
+            transformer_import = _import_sentence_transformers()
+            if transformer_import is False:
+                _logger.debug("SentenceTransformers not available. Vector knowledge base disabled.")
+                self._initialized = False
+                return
+            
+            SentenceTransformer = transformer_import
+            
+            # Initialize ChromaDB client
+            self.client = chromadb.PersistentClient(
+                path=self.persist_directory,
+                settings=Settings(
+                    anonymized_telemetry=False,
+                    allow_reset=True
+                )
+            )
+            
+            # Get or create collection
+            self.collection = self.client.get_or_create_collection(
+                name="ccm_knowledge_base",
+                metadata={"description": "CCM Platform Knowledge Base"}
+            )
+            
+            # Initialize embedding model (this might take time - but only happens once)
+            # Using a lightweight model for faster inference
+            try:
+                self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+                _logger.info(f"✅ Vector knowledge base initialized. Collection size: {self.collection.count()}")
+                self._initialized = True
+            except Exception as e:
+                _logger.debug(f"Failed to load embedding model: {e}. Vector knowledge base disabled.")
+                self._initialized = False
+                self.collection = None
+                self.client = None
+            
+        except Exception as e:
+            _logger.debug(f"Failed to initialize vector knowledge base: {e}. Continuing without it.")
+            self._initialized = False
+            self.collection = None
+            self.client = None
+            self.embedding_model = None
+    
+    def add_knowledge(
+        self,
+        content: str,
+        metadata: Dict[str, Any],
+        knowledge_id: Optional[str] = None
+    ) -> str:
+        """
+        Add knowledge chunk to vector database
+        
+        Args:
+            content: The knowledge content (text)
+            metadata: Metadata about the knowledge (table, column, type, etc.)
+            knowledge_id: Optional unique ID. If not provided, generates one.
+            
+        Returns:
+            The knowledge ID
+        """
+        self._ensure_initialized()
+        
+        # Check if actually initialized
+        if not self._initialized or not self.collection or not self.embedding_model:
+            _logger.debug("Vector knowledge base not available, skipping add_knowledge")
+            return ""
+        
+        # Generate embedding
+        embedding = self.embedding_model.encode(content).tolist()
+        
+        # Generate ID if not provided
+        if not knowledge_id:
+            import hashlib
+            knowledge_id = hashlib.md5(
+                f"{content}_{metadata.get('table', '')}_{metadata.get('type', '')}".encode()
+            ).hexdigest()
+        
+        # Add to collection
+        self.collection.add(
+            ids=[knowledge_id],
+            embeddings=[embedding],
+            documents=[content],
+            metadatas=[metadata]
+        )
+        
+        _logger.debug(f"Added knowledge chunk: {knowledge_id}, type: {metadata.get('type', 'unknown')}")
+        return knowledge_id
+    
+    def search(
+        self,
+        query: str,
+        n_results: int = 5,
+        filter_metadata: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Search knowledge base using semantic similarity
+        
+        Args:
+            query: Search query
+            n_results: Number of results to return
+            filter_metadata: Optional metadata filters (e.g., {"type": "column_definition"})
+            
+        Returns:
+            List of knowledge chunks with scores
+        """
+        self._ensure_initialized()
+        
+        # Check if actually initialized
+        if not self._initialized or not self.collection or not self.embedding_model:
+            _logger.debug("Vector knowledge base not available, returning empty results")
+            return []
+        
+        # Generate query embedding
+        query_embedding = self.embedding_model.encode(query).tolist()
+        
+        # Build where clause for filtering (ChromaDB format)
+        where = None
+        if filter_metadata:
+            # ChromaDB uses $in for list values
+            where = {}
+            for key, value in filter_metadata.items():
+                if isinstance(value, list):
+                    where[key] = {"$in": value}
+                else:
+                    where[key] = value
+        
+        # Search
+        results = self.collection.query(
+            query_embeddings=[query_embedding],
+            n_results=n_results,
+            where=where
+        )
+        
+        # Format results
+        knowledge_chunks = []
+        if results['ids'] and len(results['ids'][0]) > 0:
+            for i in range(len(results['ids'][0])):
+                knowledge_chunks.append({
+                    'id': results['ids'][0][i],
+                    'content': results['documents'][0][i],
+                    'metadata': results['metadatas'][0][i],
+                    'distance': results['distances'][0][i] if 'distances' in results else None
+                })
+        
+        _logger.debug(f"Search query: '{query}' returned {len(knowledge_chunks)} results")
+        return knowledge_chunks
+    
+    def get_relevant_knowledge(
+        self,
+        question: str,
+        table_names: Optional[List[str]] = None,
+        knowledge_types: Optional[List[str]] = None
+    ) -> str:
+        """
+        Get relevant knowledge for a question, formatted for LLM context
+        
+        Args:
+            question: User's question
+            table_names: Optional list of table names to filter by
+            knowledge_types: Optional list of knowledge types to filter by
+                (e.g., ["column_definition", "business_rule", "example_query"])
+        
+        Returns:
+            Formatted knowledge context string
+        """
+        try:
+            # Build metadata filter (ChromaDB format)
+            filter_metadata = None
+            if knowledge_types or table_names:
+                filter_metadata = {}
+                if knowledge_types:
+                    filter_metadata['type'] = {"$in": knowledge_types}
+                if table_names:
+                    filter_metadata['table'] = {"$in": table_names}
+            
+            # Search for relevant knowledge
+            results = self.search(
+                query=question,
+                n_results=10,
+                filter_metadata=filter_metadata if filter_metadata else None
+            )
+        except Exception as e:
+            _logger.warning(f"Error retrieving knowledge from vector DB: {e}")
+            return "No relevant knowledge available from knowledge base."
+        
+        if not results:
+            return "No relevant knowledge found in knowledge base."
+        
+        # Format results for LLM context
+        context_parts = ["=== RELEVANT KNOWLEDGE FROM KNOWLEDGE BASE ==="]
+        
+        # Group by type
+        by_type = {}
+        for result in results:
+            kb_type = result['metadata'].get('type', 'unknown')
+            if kb_type not in by_type:
+                by_type[kb_type] = []
+            by_type[kb_type].append(result)
+        
+        # Format each type
+        for kb_type, chunks in by_type.items():
+            context_parts.append(f"\n--- {kb_type.upper().replace('_', ' ')} ---")
+            for chunk in chunks[:5]:  # Limit to 5 per type
+                table = chunk['metadata'].get('table', 'N/A')
+                column = chunk['metadata'].get('column', '')
+                context_parts.append(f"\nTable: {table}" + (f", Column: {column}" if column else ""))
+                context_parts.append(chunk['content'])
+        
+        return "\n".join(context_parts)
+    
+    def clear_all(self):
+        """Clear all knowledge from the database"""
+        self._ensure_initialized()
+        self.collection.delete()
+        _logger.info("Cleared all knowledge from vector database")
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get statistics about the knowledge base"""
+        try:
+            self._ensure_initialized()
+            count = self.collection.count()
+            
+            # Get type distribution
+            all_data = self.collection.get()
+            type_dist = {}
+            if all_data['metadatas']:
+                for metadata in all_data['metadatas']:
+                    kb_type = metadata.get('type', 'unknown')
+                    type_dist[kb_type] = type_dist.get(kb_type, 0) + 1
+            
+            return {
+                'total_chunks': count,
+                'type_distribution': type_dist
+            }
+        except Exception as e:
+            _logger.warning(f"Could not get stats (vector KB not initialized): {e}")
+            return {
+                'total_chunks': 0,
+                'type_distribution': {},
+                'error': str(e)
+            }
+
+
+# Singleton instance
+_vector_kb = None
+
+def get_vector_knowledge_base() -> VectorKnowledgeBase:
+    """Get singleton vector knowledge base instance"""
+    global _vector_kb
+    if _vector_kb is None:
+        _vector_kb = VectorKnowledgeBase()
+    return _vector_kb
+
