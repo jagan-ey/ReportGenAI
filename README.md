@@ -1,4 +1,4 @@
-# GenAI-Based Continuous Controls Monitoring (CCM) Platform - POC
+         # GenAI-Based Continuous Controls Monitoring (CCM) Platform - POC
 
 A proof-of-concept implementation of a GenAI-driven Continuous Controls Monitoring platform for banking, featuring natural language query capabilities with 100% accuracy for predefined regulatory queries.
 
@@ -184,4 +184,4 @@ This is a POC for internal evaluation. For questions or issues, please refer to 
 
 ## 📄 License
 
-Proprietary - Axis Bank Internal Project
+Proprietary
