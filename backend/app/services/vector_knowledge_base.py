@@ -53,14 +53,15 @@ class VectorKnowledgeBase:
     Stores schema information, business rules, column definitions, and document knowledge.
     """
     
-    def __init__(self, persist_directory: str = "./chroma_db"):
+    def __init__(self, persist_directory: str = None):
         """
         Initialize vector knowledge base
         
         Args:
-            persist_directory: Directory to persist ChromaDB data
+            persist_directory: Directory to persist ChromaDB data (defaults to settings.VECTOR_DB_PATH)
         """
-        self.persist_directory = persist_directory
+        from app.core.config import settings
+        self.persist_directory = persist_directory or settings.VECTOR_DB_PATH
         self.client = None
         self.collection = None
         self.embedding_model = None
@@ -69,16 +70,22 @@ class VectorKnowledgeBase:
         
     def _ensure_initialized(self):
         """Lazy initialization of ChromaDB and embedding model - non-blocking"""
-        # If already attempted (successfully or not), don't try again
-        if hasattr(self, '_init_attempted'):
+        # If already successfully initialized, don't try again
+        if self._initialized and self.collection is not None:
             return
+        
+        # If initialization failed before, don't retry (to avoid repeated errors)
+        if hasattr(self, '_init_attempted') and self._init_attempted and not self._initialized:
+            return
+        
         self._init_attempted = True
         
         try:
             # Import dependencies
             chromadb_import = _import_chromadb()
             if chromadb_import is False:
-                _logger.debug("ChromaDB not available. Vector knowledge base disabled.")
+                error_msg = "ChromaDB not available. Install with: pip install chromadb"
+                _logger.error(error_msg)
                 self._initialized = False
                 return
             
@@ -87,7 +94,8 @@ class VectorKnowledgeBase:
             
             transformer_import = _import_sentence_transformers()
             if transformer_import is False:
-                _logger.debug("SentenceTransformers not available. Vector knowledge base disabled.")
+                error_msg = "SentenceTransformers not available. Install with: pip install sentence-transformers"
+                _logger.error(error_msg)
                 self._initialized = False
                 return
             
@@ -102,9 +110,11 @@ class VectorKnowledgeBase:
                 )
             )
             
-            # Get or create collection
+            # Get or create collection (use collection name from settings)
+            from app.core.config import settings
+            collection_name = settings.KNOWLEDGE_BASE_COLLECTION
             self.collection = self.client.get_or_create_collection(
-                name="ccm_knowledge_base",
+                name=collection_name,
                 metadata={"description": "CCM Platform Knowledge Base"}
             )
             
@@ -115,13 +125,17 @@ class VectorKnowledgeBase:
                 _logger.info(f"✅ Vector knowledge base initialized. Collection size: {self.collection.count()}")
                 self._initialized = True
             except Exception as e:
-                _logger.debug(f"Failed to load embedding model: {e}. Vector knowledge base disabled.")
+                error_msg = f"Failed to load embedding model: {e}. Vector knowledge base disabled."
+                _logger.error(error_msg)
+                _logger.error("Try: pip install --upgrade sentence-transformers huggingface-hub")
                 self._initialized = False
                 self.collection = None
                 self.client = None
             
         except Exception as e:
-            _logger.debug(f"Failed to initialize vector knowledge base: {e}. Continuing without it.")
+            error_msg = f"Failed to initialize vector knowledge base: {e}"
+            _logger.error(error_msg)
+            _logger.error("Please check that ChromaDB and SentenceTransformers are installed correctly.")
             self._initialized = False
             self.collection = None
             self.client = None
@@ -297,8 +311,28 @@ class VectorKnowledgeBase:
     def clear_all(self):
         """Clear all knowledge from the database"""
         self._ensure_initialized()
-        self.collection.delete()
-        _logger.info("Cleared all knowledge from vector database")
+        
+        # Check if collection is available
+        if not self.collection:
+            _logger.error("Cannot clear knowledge base: ChromaDB collection not initialized. Check if ChromaDB and SentenceTransformers are installed.")
+            raise RuntimeError(
+                "Vector knowledge base not initialized. "
+                "Please ensure ChromaDB and SentenceTransformers are installed: "
+                "pip install chromadb sentence-transformers"
+            )
+        
+        # Delete all documents from the collection
+        try:
+            # Get all IDs first
+            all_data = self.collection.get()
+            if all_data['ids'] and len(all_data['ids']) > 0:
+                self.collection.delete(ids=all_data['ids'])
+                _logger.info(f"Cleared {len(all_data['ids'])} knowledge chunks from vector database")
+            else:
+                _logger.info("Knowledge base is already empty")
+        except Exception as e:
+            _logger.error(f"Error clearing knowledge base: {e}")
+            raise
     
     def get_stats(self) -> Dict[str, Any]:
         """Get statistics about the knowledge base"""
