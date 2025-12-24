@@ -33,15 +33,26 @@ class Settings(BaseSettings):
     )
     LLM_TEMPERATURE: float = 0.0  # Low temperature for deterministic SQL generation
     
-    # SQL Server Database
+    # SQL Server Database (Main Application Database)
+    # NOTE: These are development defaults. In production, set via environment variables.
     DB_DRIVER: str = "ODBC Driver 17 for SQL Server"
-    DB_SERVER: str = "IN3311064W1\\SQLSERVERDEV"
+    DB_SERVER: str = ""  # Set via DB_SERVER environment variable
     DB_USERNAME: str = ""
     DB_PASSWORD: str = ""
-    DB_NAME: str = "ey_digicube"
+    DB_NAME: str = ""  # Set via DB_NAME environment variable
+    
+    # Knowledge Base Database (Regulatory Data Mart)
+    # This is the database where the dimension tables are located (e.g., axis_reg_mart)
+    # If not specified, defaults to main DB settings (for backward compatibility)
+    KB_DB_SERVER: str = ""  # Set via KB_DB_SERVER environment variable (defaults to DB_SERVER if not set)
+    KB_DB_NAME: str = ""  # Set via KB_DB_NAME environment variable (e.g., "axis_reg_mart" - the regulatory data mart database name)
+    KB_DB_USERNAME: str = ""  # Set via KB_DB_USERNAME (defaults to DB_USERNAME if not set)
+    KB_DB_PASSWORD: str = ""  # Set via KB_DB_PASSWORD (defaults to DB_PASSWORD if not set)
+    KB_DB_DRIVER: str = "ODBC Driver 17 for SQL Server"  # Same driver as main DB
     
     # CORS
-    CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:5173"]
+    # NOTE: Defaults are for development. In production, set CORS_ORIGINS via environment variable (comma-separated).
+    CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:5173"]  # Dev defaults
     ALLOWED_HOSTS: List[str] = ["*"]
     
     # Query Settings
@@ -49,8 +60,9 @@ class Settings(BaseSettings):
     QUERY_TIMEOUT: int = 30  # seconds (SQL Server may need more time)
     
     # BIU SPOC Contact Information
+    # NOTE: These are generic defaults. Configure via environment variables for production.
     BIU_SPOC_NAME: str = "BIU Support Team"
-    BIU_SPOC_EMAIL: str = "biu.support@axisbank.com"
+    BIU_SPOC_EMAIL: str = "biu.support@bank.com"  # Generic default, configure via env var
     BIU_SPOC_PHONE: str = "+91-22-2425-2525"
     BIU_SPOC_EXTENSION: str = "Ext. 1234"
     

@@ -15,7 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sqlalchemy.orm import Session
-from app.core.database import get_db, get_engine
+from app.core.database import get_db, get_engine, get_kb_db, get_kb_engine
 from app.services.knowledge_base_processor import KnowledgeBaseProcessor
 from app.services.vector_knowledge_base import get_vector_knowledge_base
 import logging
@@ -37,8 +37,8 @@ def main():
     processor = KnowledgeBaseProcessor()
     vector_kb = get_vector_knowledge_base()
     
-    # Get database session
-    db_gen = get_db()
+    # Get Knowledge Base database session (regulatory data mart)
+    db_gen = get_kb_db()
     db = next(db_gen)
     
     try:

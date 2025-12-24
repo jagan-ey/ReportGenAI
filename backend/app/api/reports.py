@@ -48,7 +48,7 @@ def get_current_user(
     return {
         "user_id": 0,
         "username": "system",
-        "email": "system@axisbank.com",
+        "email": "system@bank.com",
         "role": "user",
         "full_name": "System User",
         "department": None
@@ -277,7 +277,7 @@ async def list_approvers(
                     "user_id": "approver.user",
                     "username": "approver.user",
                     "name": "Approver User",
-                    "email": "approver@axisbank.com",
+                    "email": "approver@bank.com",
                     "role": "approver",
                     "department": "Risk Management"
                 },
@@ -285,7 +285,7 @@ async def list_approvers(
                     "user_id": "manager.smith",
                     "username": "manager.smith",
                     "name": "Manager Smith",
-                    "email": "manager.smith@axisbank.com",
+                    "email": "manager.smith@bank.com",
                     "role": "approver",
                     "department": "Compliance"
                 },
@@ -293,7 +293,7 @@ async def list_approvers(
                     "user_id": "senior.approver",
                     "username": "senior.approver",
                     "name": "Senior Approver",
-                    "email": "senior.approver@axisbank.com",
+                    "email": "senior.approver@bank.com",
                     "role": "approver",
                     "department": "Audit"
                 }

@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { useUser } from '../contexts/UserContext'
+import { login as apiLogin, register } from '../services/api'
 import './Login.css'
 
 function Login() {
@@ -26,35 +27,18 @@ function Login() {
     setLoading(true)
 
     try {
-      const response = await fetch('http://localhost:8000/api/auth/login', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          username: username,
-          password: password
-        })
+      const data = await apiLogin(username, password)
+      // Store user info and login
+      login({
+        user_id: data.user.user_id,
+        username: data.user.username,
+        email: data.user.email,
+        full_name: data.user.full_name,
+        role: data.user.role,
+        department: data.user.department
       })
-
-      const data = await response.json()
-
-      if (response.ok) {
-        // Store user info and login
-        login({
-          user_id: data.user.user_id,
-          username: data.user.username,
-          email: data.user.email,
-          full_name: data.user.full_name,
-          role: data.user.role,
-          department: data.user.department
-        })
-      } else {
-        setError(data.detail || 'Login failed. Please check your credentials.')
-      }
     } catch (error) {
-      setError('Error connecting to server. Please try again.')
-      console.error('Login error:', error)
+      setError(error.message || 'Login failed. Please check your credentials.')
     } finally {
       setLoading(false)
     }
@@ -79,39 +63,25 @@ function Login() {
     setLoading(true)
 
     try {
-      const response = await fetch('http://localhost:8000/api/auth/users', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          username: regData.username,
-          email: regData.email,
-          password: regData.password,
-          full_name: regData.fullName,
-          role: 'user', // Default role for new registrations
-          department: regData.department || null
-        })
+      const data = await register({
+        username: regData.username,
+        email: regData.email,
+        password: regData.password,
+        full_name: regData.fullName,
+        role: 'user', // Default role for new registrations
+        department: regData.department || null
       })
-
-      const data = await response.json()
-
-      if (response.ok) {
-        // Auto-login after registration
-        login({
-          user_id: data.user.user_id,
-          username: data.user.username,
-          email: data.user.email,
-          full_name: data.user.full_name,
-          role: data.user.role,
-          department: data.user.department
-        })
-      } else {
-        setError(data.detail || 'Registration failed. Please try again.')
-      }
+      // Auto-login after registration
+      login({
+        user_id: data.user.user_id,
+        username: data.user.username,
+        email: data.user.email,
+        full_name: data.user.full_name,
+        role: data.user.role,
+        department: data.user.department
+      })
     } catch (error) {
-      setError('Error connecting to server. Please try again.')
-      console.error('Registration error:', error)
+      setError(error.message || 'Registration failed. Please try again.')
     } finally {
       setLoading(false)
     }

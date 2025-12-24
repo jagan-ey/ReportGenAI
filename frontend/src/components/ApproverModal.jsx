@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import { getApprovers } from '../services/api'
 import './ApproverModal.css'
 
 function ApproverModal({ isOpen, onClose, onSelect, currentUser }) {
@@ -16,17 +17,8 @@ function ApproverModal({ isOpen, onClose, onSelect, currentUser }) {
   const fetchApprovers = async () => {
     setLoading(true)
     try {
-      const response = await fetch('http://localhost:8000/api/reports/approvers', {
-        headers: {
-          'X-User-ID': currentUser?.username || 'system'
-        }
-      })
-      if (response.ok) {
-        const data = await response.json()
-        setApprovers(data.approvers || [])
-      } else {
-        console.error('Failed to fetch approvers')
-      }
+      const data = await getApprovers(currentUser?.username || 'system')
+      setApprovers(data.approvers || [])
     } catch (error) {
       console.error('Error fetching approvers:', error)
     } finally {

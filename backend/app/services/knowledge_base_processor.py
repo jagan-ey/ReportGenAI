@@ -9,7 +9,7 @@ from typing import List, Dict, Optional, Any
 import logging
 from sqlalchemy.orm import Session
 from sqlalchemy import text, inspect, MetaData
-from app.core.database import get_engine, get_db
+from app.core.database import get_engine, get_db, get_kb_engine, get_kb_db
 from app.core.config import settings
 from app.services.vector_knowledge_base import get_vector_knowledge_base
 from langchain_openai import AzureChatOpenAI
@@ -52,6 +52,7 @@ class KnowledgeBaseProcessor:
     def process_database_schema(self, db: Session) -> int:
         """
         Process database schema to extract table and column information
+        Uses the Knowledge Base database (regulatory data mart) connection
         
         Returns:
             Number of knowledge chunks created
@@ -60,7 +61,8 @@ class KnowledgeBaseProcessor:
         chunks_created = 0
         
         try:
-            engine = get_engine()
+            # Use KB engine instead of main engine (regulatory data mart)
+            engine = get_kb_engine()
             inspector = inspect(engine)
             tables = inspector.get_table_names(schema='dbo')
             
@@ -85,18 +87,39 @@ class KnowledgeBaseProcessor:
                     foreign_keys=foreign_keys
                 )
                 
-                # Add table-level knowledge
+                # Add table-level knowledge with enriched business context
+                synonyms_text = ""
+                if table_info.get('business_synonyms'):
+                    synonyms_text = f"\nBusiness Synonyms (alternative names users might use):\n" + "\n".join([f"  - {syn}" for syn in table_info.get('business_synonyms', [])])
+                
+                column_semantics_text = ""
+                if table_info.get('column_semantics'):
+                    column_semantics_text = "\nColumn Business Meanings:\n" + "\n".join([f"  - {col}: {meaning}" for col, meaning in table_info.get('column_semantics', {}).items()])
+                
+                example_queries_text = ""
+                if table_info.get('example_queries'):
+                    example_queries_text = "\nExample Natural Language Queries:\n" + "\n".join([f"  - {q}" for q in table_info.get('example_queries', [])])
+                
                 table_knowledge = f"""Table: {table_name}
 
-Description: {table_info.get('description', 'N/A')}
+Business Description: {table_info.get('description', 'N/A')}
+{synonyms_text}
 
 Columns:
 {self._format_columns_for_kb(columns, primary_keys)}
+{column_semantics_text}
 
 Primary Keys: {', '.join(primary_keys) if primary_keys else 'None'}
 
 Foreign Key Relationships:
 {self._format_foreign_keys(foreign_keys)}
+
+Business Use Cases:
+{table_info.get('use_cases', 'N/A')}
+
+Table Relationships:
+{table_info.get('relationships', 'N/A')}
+{example_queries_text}
 """
                 
                 self.vector_kb.add_knowledge(
@@ -139,12 +162,13 @@ Foreign Key Relationships:
     def process_sample_data(self, db: Session, tables: Optional[List[str]] = None, sample_size: int = 100) -> int:
         """
         Process sample data from tables to extract patterns and valid values
+        Uses the Knowledge Base database (regulatory data mart) connection
         
         Args:
-            db: Database session
+            db: Database session (should be from KB database)
             tables: Optional list of table names. If None, processes all tables.
             sample_size: Number of sample rows to analyze per table
-            
+        
         Returns:
             Number of knowledge chunks created
         """
@@ -152,7 +176,8 @@ Foreign Key Relationships:
         chunks_created = 0
         
         try:
-            engine = get_engine()
+            # Use KB engine instead of main engine (regulatory data mart)
+            engine = get_kb_engine()
             inspector = inspect(engine)
             table_list = tables or inspector.get_table_names(schema='dbo')
             
@@ -297,14 +322,14 @@ Foreign Key Relationships:
         primary_keys: List[str],
         foreign_keys: List[Dict]
     ) -> Dict[str, str]:
-        """Use LLM to create intelligent table description"""
+        """Use LLM to create intelligent, enriched table description with business context"""
         try:
             columns_info = "\n".join([
                 f"- {col['name']}: {col.get('type', 'unknown')}"
                 for col in columns
             ])
             
-            prompt = f"""Analyze this database table and provide a clear, business-focused description.
+            prompt = f"""You are a database analyst creating enriched documentation for a banking/financial services database table.
 
 Table Name: {table_name}
 Columns:
@@ -312,13 +337,34 @@ Columns:
 
 Primary Keys: {', '.join(primary_keys) if primary_keys else 'None'}
 
-Provide:
-1. A brief description of what this table represents in business terms
-2. Key business use cases for this table
-3. Important relationships or dependencies
+Analyze this table and provide RICH, BUSINESS-CONTEXTUAL information:
+
+1. **Business Description**: What does this table represent in banking/financial terms? (e.g., "Customer master data", "Loan account details", "Gold collateral information")
+
+2. **Business Synonyms & Alternative Names**: What are common business terms or alternative names users might use to refer to this table? 
+   - For example, if table is "super_loan_account_dim", synonyms might be: "Loans", "Loan Accounts", "Loan Details", "Active Loans"
+   - List 5-10 common synonyms that users might use in natural language queries
+
+3. **Key Business Use Cases**: What types of queries or reports would use this table?
+   - Example: "Finding all active loan accounts", "Checking loan tenure", "Viewing loan account balances"
+
+4. **Column Semantics**: For key columns, what do they represent in business terms?
+   - Map technical column names to business concepts (e.g., "ACCNO" = "Loan Account Number", "TENURE" = "Loan Tenure in Months")
+
+5. **Relationships**: How does this table relate to other tables? What joins are commonly used?
+
+6. **Example Natural Language Queries**: Provide 3-5 example questions users might ask that would query this table
+   - Example: "Show me all loans", "Find loan accounts with tenure > 12 months", "List active loan accounts"
 
 Return JSON format:
-{{"description": "...", "use_cases": "...", "relationships": "..."}}
+{{
+    "description": "Clear business description",
+    "business_synonyms": ["synonym1", "synonym2", ...],
+    "use_cases": "Detailed use cases",
+    "column_semantics": {{"COLUMN_NAME": "business meaning", ...}},
+    "relationships": "Table relationships",
+    "example_queries": ["query1", "query2", ...]
+}}
 """
             
             response = self._llm.invoke([HumanMessage(content=prompt)])
@@ -327,13 +373,37 @@ Return JSON format:
             # Parse JSON response
             import json
             try:
-                return json.loads(content)
-            except:
-                return {"description": content, "use_cases": "", "relationships": ""}
+                result = json.loads(content)
+                # Ensure all fields exist
+                return {
+                    "description": result.get("description", ""),
+                    "business_synonyms": result.get("business_synonyms", []),
+                    "use_cases": result.get("use_cases", ""),
+                    "column_semantics": result.get("column_semantics", {}),
+                    "relationships": result.get("relationships", ""),
+                    "example_queries": result.get("example_queries", [])
+                }
+            except Exception as e:
+                _logger.warning(f"Could not parse JSON response: {e}. Using raw content.")
+                return {
+                    "description": content,
+                    "business_synonyms": [],
+                    "use_cases": "",
+                    "column_semantics": {},
+                    "relationships": "",
+                    "example_queries": []
+                }
                 
         except Exception as e:
             _logger.warning(f"Error creating table description: {e}")
-            return {"description": f"Table {table_name} with {len(columns)} columns", "use_cases": "", "relationships": ""}
+            return {
+                "description": f"Table {table_name} with {len(columns)} columns",
+                "business_synonyms": [],
+                "use_cases": "",
+                "column_semantics": {},
+                "relationships": "",
+                "example_queries": []
+            }
     
     def _create_column_knowledge(
         self,
@@ -341,28 +411,52 @@ Return JSON format:
         column: Dict,
         is_primary_key: bool
     ) -> Optional[str]:
-        """Use LLM to create intelligent column knowledge"""
+        """Use LLM to create intelligent, enriched column knowledge with business context"""
         try:
-            prompt = f"""Analyze this database column and provide business context.
+            prompt = f"""You are a database analyst creating enriched documentation for a banking/financial services database column.
 
 Table: {table_name}
 Column: {column['name']}
 Data Type: {column.get('type', 'unknown')}
 Primary Key: {is_primary_key}
 
-Provide:
-1. Business meaning of this column
-2. Common valid values or patterns (if applicable)
-3. Business rules or constraints
-4. Example usage in queries
+Provide RICH, BUSINESS-CONTEXTUAL information:
 
-Return a clear, concise description suitable for SQL generation.
+1. **Business Meaning**: What does this column represent in banking/financial terms?
+   - Be specific: "Loan Account Number" not just "Account Number"
+   - Include context: "Loan tenure in months" not just "Tenure"
+
+2. **Business Synonyms**: What are alternative names or terms users might use to refer to this column?
+   - For example, "ACCNO" might be referred to as "Account Number", "Loan Account Number", "Account ID"
+   - List 3-5 common synonyms
+
+3. **Valid Values & Patterns**: What are common valid values, formats, or patterns?
+   - For codes: List common code values and their meanings
+   - For dates: Explain date format and business meaning
+   - For amounts: Explain currency and precision
+
+4. **Business Rules**: What business rules or constraints apply?
+   - Example: "Must be unique", "Cannot be null for active accounts", "Must be >= 0"
+
+5. **Usage in Queries**: How is this column typically used in SQL queries?
+   - Example: "Used in WHERE clauses to filter by account", "Used in SELECT to display loan details"
+
+6. **Semantic Mapping**: Map this technical column name to business concepts
+   - Example: "ACCNO" maps to business concepts: "Loan Account", "Account Number", "Loan ID"
+
+Return a clear, structured description suitable for SQL query generation.
 """
             
             response = self._llm.invoke([HumanMessage(content=prompt)])
             content = response.content if hasattr(response, 'content') else str(response)
             
-            return f"Column: {column['name']}\nTable: {table_name}\nData Type: {column.get('type', 'unknown')}\n\n{content}"
+            return f"""Column: {column['name']}
+Table: {table_name}
+Data Type: {column.get('type', 'unknown')}
+Primary Key: {is_primary_key}
+
+{content}
+"""
             
         except Exception as e:
             _logger.warning(f"Error creating column knowledge: {e}")

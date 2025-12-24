@@ -18,7 +18,7 @@ function ParticleBackground() {
       const themes = {
         light: { primary: '#2563eb', secondary: '#7c3aed', accent: '#06b6d4' },
         dark: { primary: '#3b82f6', secondary: '#8b5cf6', accent: '#22d3ee' },
-        axis: { primary: '#AE275F', secondary: '#EB1165', accent: '#EB1165' },
+        corporate: { primary: '#AE275F', secondary: '#EB1165', accent: '#EB1165' },
         blue: { primary: '#0ea5e9', secondary: '#0284c7', accent: '#06b6d4' },
         purple: { primary: '#8b5cf6', secondary: '#7c3aed', accent: '#a78bfa' },
         green: { primary: '#10b981', secondary: '#059669', accent: '#34d399' },

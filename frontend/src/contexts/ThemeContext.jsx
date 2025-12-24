@@ -35,11 +35,11 @@ const THEMES = {
       info: '#60a5fa',
     }
   },
-  axis: {
-    name: 'Axis Bank',
+  corporate: {
+    name: 'Corporate',
     colors: {
-      primary: '#AE275F', // X11 Maroon (Axis theme primary)
-      secondary: '#EB1165', // Ruby (Axis theme secondary)
+      primary: '#AE275F', // X11 Maroon (Corporate theme primary)
+      secondary: '#EB1165', // Ruby (Corporate theme secondary)
       accent: '#EB1165', // Keep accent aligned to Ruby
       success: '#10b981', // Green for success
       warning: '#f59e0b', // Amber for warnings
@@ -135,8 +135,8 @@ export const ThemeProvider = ({ children }) => {
       document.documentElement.style.setProperty('--error-color', theme.colors.error)
       document.documentElement.style.setProperty('--info-color', theme.colors.info)
       
-      // Header colors - use primary color for header, or burgundy for Axis theme
-      if (colorTheme === 'axis') {
+      // Header colors - use primary color for header, or burgundy for Corporate theme
+      if (colorTheme === 'corporate') {
         document.documentElement.style.setProperty('--header-bg-start', '#AE275F')
         document.documentElement.style.setProperty('--header-bg-end', '#EB1165')
         document.documentElement.style.setProperty('--header-text', '#ffffff')

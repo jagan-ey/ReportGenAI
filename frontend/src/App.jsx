@@ -7,6 +7,7 @@ import Login from './components/Login'
 import ApprovalsDashboard from './components/ApprovalsDashboard'
 import { ThemeProvider } from './contexts/ThemeContext'
 import { UserProvider, useUser } from './contexts/UserContext'
+import { getPredefinedQueries } from './services/api'
 import './App.css'
 
 function AppContent() {
@@ -19,8 +20,7 @@ function AppContent() {
     if (isAuthenticated) {
       // Load predefined queries on mount (only when authenticated and not approver)
       if (user?.role !== 'approver' && user?.role !== 'admin') {
-        fetch('http://localhost:8000/api/chat/predefined')
-          .then(res => res.json())
+        getPredefinedQueries()
           .then(data => setPredefinedQueries(data.queries || []))
           .catch(err => console.error('Error loading queries:', err))
       }

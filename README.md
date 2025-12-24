@@ -1,64 +1,89 @@
-# GenAI-Based Continuous Controls Monitoring (CCM) Platform - POC
+# GenAI-Based Continuous Controls Monitoring (CCM) Platform
 
-A proof-of-concept implementation of a GenAI-driven Continuous Controls Monitoring platform for banking, featuring natural language query capabilities with 100% accuracy for predefined regulatory queries.
+An intelligent GenAI-driven Continuous Controls Monitoring platform for banking, featuring natural language query capabilities with LLM agents, vector knowledge base (RAG), and multi-agent orchestration for accurate SQL generation.
 
 ## 🎯 Overview
 
-This POC demonstrates:
-- **7 Predefined Control Questions** with 100% accuracy
-- **8 BIU Star Schema Tables** with synthetic data
-- **Natural Language to SQL** conversion using LangChain
-- **No Vector DB** - Simplified architecture for POC
-- **FastAPI Backend** with SQL agent
-- **Synthetic Data Generation** for testing
+This platform provides:
+- **Multi-Agent LLM System** - Orchestrator, SQLMaker, SQL Validator, FollowUp, and Conversational agents
+- **Vector Knowledge Base (RAG)** - ChromaDB-based knowledge base with enriched domain knowledge
+- **Saved Queries** - Predefined regulatory queries with 100% accuracy
+- **Natural Language to SQL** - Intelligent SQL generation using Azure OpenAI (GPT-4o)
+- **8 BIU Star Schema Tables** - Regulatory data mart with dimension tables
+- **Separate Database Architecture** - Application database (ccm_genai) and Knowledge Base database (axis_reg_mart)
+- **FastAPI Backend** - RESTful API with comprehensive agent orchestration
+- **React Frontend** - Modern chat interface with real-time agent feedback
 
-## 📋 The 7 Control Questions
+## 🤖 LLM Agents
 
-1. **ReKYC Freeze Control**: Customers whose ReKYC due >6 months, but ReKYC Credit freeze not applied under freeze code RKYCF?
-2. **Mobile Number Duplication**: Customers having Single Mobile number updated in more than 10 ONI CIF IDs for Current Account?
-3. **Gold Loan Tenure**: Tenure of more than 12 months for gold loan accounts under scheme code LRGMI for non-agricultural product variant with monthly interest payment?
-4. **IEC Code Missing**: IEC code in CAGBL account not captured for Current Accounts?
-5. **Gold Content Validation**: Customers having Gold Content in Mangalsutra is below 60% of Gross Weight?
-6. **Mangalsutra Weight**: Customers having Mangalsutra is offered as a standalone jewellery, the net weight is less than 25gms?
-7. **Tractor Loan Mapping**: Customers incorrectly mapped to Tractor loans (01,03 & 11 are eligible constitution code)?
+The platform uses a multi-agent architecture:
+
+1. **Orchestrator Agent** - Routes queries to appropriate agents (saved queries, SQL generation, or conversational)
+2. **SQLMaker Agent** - Generates SQL queries from natural language using RAG knowledge base
+3. **SQL Validator Agent** - Validates and corrects SQL queries (fallback when SQLMaker fails)
+4. **FollowUp Agent** - Asks clarifying questions before query execution (date column selection, data freshness)
+5. **Conversational Agent** - Handles non-data questions about the platform, schema, and capabilities
+
+## 📊 Knowledge Base (RAG)
+
+- **Vector Database**: ChromaDB for semantic search
+- **Knowledge Sources**: Database schema, sample data, business documents (PDF, DOCX, TXT)
+- **Enrichment**: LLM-generated business context, synonyms, valid values, relationships
+- **Auto-updates**: Knowledge base can be rebuilt when regulatory data mart schema changes
 
 ## 🏗️ Architecture
 
 ```
-┌─────────────────┐
-│  React Frontend │  (To be implemented)
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  FastAPI Backend│
-│  - Chat API     │
-│  - Query Router │
-└────────┬────────┘
-         │
-    ┌────┴────┐
-    │         │
-    ▼         ▼
-┌────────┐ ┌──────────────┐
-│Predefined│ │ LangChain   │
-│Queries   │ │ SQL Agent   │
-│(100% acc)│ │ (Ad-hoc)    │
-└────┬───┘ └──────┬───────┘
-     │           │
-     └─────┬─────┘
+┌─────────────────────┐
+│  React Frontend     │
+│  - Chat Interface   │
+│  - Agent Badges     │
+│  - Follow-up Q&A    │
+└──────────┬──────────┘
+           │
            ▼
-    ┌─────────────┐
-    │ SQLite DB   │
-    │ (8 Tables)  │
-    └─────────────┘
+┌─────────────────────┐
+│  FastAPI Backend    │
+│  - Orchestrator     │
+│  - Multi-Agent Sys  │
+└──────────┬──────────┘
+           │
+    ┌──────┴──────┐
+    │             │
+    ▼             ▼
+┌─────────┐  ┌──────────────────┐
+│ SQLMaker│  │ SQL Validator    │
+│ Agent   │  │ Agent (Fallback)  │
+└────┬────┘  └────────┬──────────┘
+     │                │
+     ▼                ▼
+┌─────────────────────────────┐
+│  Vector Knowledge Base (RAG)│
+│  - ChromaDB                 │
+│  - Domain Knowledge          │
+└──────────┬──────────────────┘
+           │
+    ┌──────┴──────┐
+    │             │
+    ▼             ▼
+┌──────────┐  ┌──────────────┐
+│ ccm_genai│  │axis_reg_mart │
+│ (App DB) │  │ (KB/Data DB) │
+│          │  │              │
+│ - users  │  │ - 8 Dimension│
+│ - saved  │  │   Tables     │
+│   queries│  │              │
+└──────────┘  └──────────────┘
 ```
 
 ## 🚀 Quick Start
 
 ### Prerequisites
 - Python 3.10+
-- OpenAI API Key
-- (Optional) Node.js 18+ for frontend
+- SQL Server (with two databases: `ccm_genai` and `axis_reg_mart`)
+- Azure OpenAI API Key and Endpoint
+- Node.js 18+ for frontend
+- ODBC Driver 17 for SQL Server
 
 ### Backend Setup
 
@@ -75,16 +100,23 @@ venv\Scripts\activate  # Windows
 pip install -r requirements.txt
 
 # Set up environment
-# Create a local .env (this repo does not commit .env files)
+# Create a local .env file (this repo does not commit .env files)
 # On Windows (PowerShell):
 #   Copy-Item env.example .env
 # On Mac/Linux:
 #   cp env.example .env
 #
-# Edit `.env` and set Azure OpenAI + DB config (see env.example).
+# Edit `.env` and configure:
+#   - Azure OpenAI settings (API key, endpoint, deployment)
+#   - Main application database (DB_SERVER, DB_NAME=ccm_genai, DB_USERNAME, DB_PASSWORD)
+#   - Knowledge base database (KB_DB_SERVER, KB_DB_NAME=axis_reg_mart, KB_DB_USERNAME, KB_DB_PASSWORD)
+#   See env.example for all available settings.
 
-# Initialize database with synthetic data
+# Initialize application database tables
 python scripts/init_db.py
+
+# (Optional) Build vector knowledge base from regulatory data mart
+python scripts/build_knowledge_base.py
 
 # Run server
 uvicorn app.main:app --reload
@@ -105,54 +137,94 @@ curl -X POST http://localhost:8000/api/chat/query \
   -d '{"question": "Customers whose ReKYC due >6 months, but ReKYC Credit freeze not applied under freeze code RKYCF?"}'
 ```
 
-## 📊 Database Schema
+## 📊 Database Architecture
 
-The POC uses 8 BIU Star Schema tables:
+### Application Database (`ccm_genai`)
+Stores application-specific data:
+- **users** - User accounts and authentication
+- **predefined_queries** - Saved queries (formerly predefined queries)
+- **approval_requests** - Report approval workflow
+- **scheduled_reports** - Scheduled report configurations
 
-1. **SUPER_CUSTOMER_DIM** - Customer master (100 records)
-2. **CUSTOMER_NON_INDIVIDUAL_DIM** - Non-individual customers (100 records)
-3. **ACCOUNT_CA_DIM** - Current accounts (150 records)
-4. **SUPER_LOAN_DIM** - Loan master (200 records)
-5. **SUPER_LOAN_ACCOUNT_DIM** - Loan details (200 records)
-6. **CASELITE_LOAN_APPLICATIONS** - Gold loan apps (150 records)
-7. **GOLD_COLLATERAL_DIM** - Gold collateral (150 records)
-8. **CUSTOM_FREEZE_DETAILS_DIM** - Freeze details (variable)
+### Knowledge Base Database (`axis_reg_mart`)
+Contains regulatory data mart with 8 dimension tables:
+1. **SUPER_CUSTOMER_DIM** - Customer master
+2. **CUSTOMER_NON_INDIVIDUAL_DIM** - Non-individual customers
+3. **ACCOUNT_CA_DIM** - Current accounts
+4. **SUPER_LOAN_DIM** - Loan master
+5. **SUPER_LOAN_ACCOUNT_DIM** - Loan details
+6. **CASELITE_LOAN_APPLICATIONS** - Gold loan applications
+7. **GOLD_COLLATERAL_DIM** - Gold collateral
+8. **CUSTOM_FREEZE_DETAILS_DIM** - Freeze details
+
+**Note**: The knowledge base processor reads from `axis_reg_mart` to build the vector knowledge base (RAG).
 
 ## 🔑 Key Features
 
-### 1. Predefined Query Routing (100% Accuracy)
-- Keyword-based matching for 7 predefined questions
-- Direct SQL execution (no LLM for predefined queries)
-- Guaranteed accuracy for regulatory submissions
+### 1. Multi-Agent LLM System
+- **Orchestrator Agent**: Intelligent routing based on query type
+- **SQLMaker Agent**: Generates SQL using RAG knowledge base
+- **SQL Validator Agent**: Fallback correction when SQLMaker fails
+- **FollowUp Agent**: Asks clarifying questions (date columns, data freshness)
+- **Conversational Agent**: Answers questions about platform and schema
 
-### 2. Ad-hoc Query Support
-- LangChain SQL Agent for natural language queries
-- Schema-aware SQL generation
-- Query validation and safety checks
+### 2. Vector Knowledge Base (RAG)
+- **ChromaDB**: Semantic search for domain knowledge
+- **Auto-enrichment**: LLM processes schema, data, and documents
+- **Business context**: Synonyms, valid values, relationships, example queries
+- **Maintenance**: Rebuild when regulatory data mart schema changes
 
-### 3. Synthetic Data
-- Realistic relationships between tables
-- Edge cases included for all 7 questions
-- Sufficient data volume for meaningful results
+### 3. Saved Queries (100% Accuracy)
+- Predefined regulatory queries stored in database
+- Intelligent matching with date/number threshold validation
+- Direct SQL execution for guaranteed accuracy
+
+### 4. Intelligent SQL Generation
+- Schema-aware SQL generation using RAG
+- Self-repair mechanism (2-pass generation)
+- Post-execution query simplification
+- Generic and schema-driven (no hardcoded values)
+
+### 5. Query Safety & Validation
+- SQL injection prevention
+- SELECT-only queries
+- Dangerous keyword blocking
+- Schema validation before execution
 
 ## 📁 Project Structure
 
 ```
-AxisGenAI/
+ccm-genai/
 ├── backend/
 │   ├── app/
-│   │   ├── api/           # API endpoints
-│   │   ├── core/          # Configuration, database, logging
-│   │   ├── database/      # Schema and data generation
-│   │   ├── services/      # Business logic (SQL agent, queries)
-│   │   └── main.py        # FastAPI app
+│   │   ├── api/              # API endpoints (chat, auth, reports, health)
+│   │   ├── core/             # Configuration, database, logging
+│   │   ├── database/         # Application schema (users, queries)
+│   │   ├── models/           # User models (User, ApprovalRequest, ScheduledReport)
+│   │   ├── services/         # LLM agents and business logic
+│   │   │   ├── orchestrator_agent.py
+│   │   │   ├── sql_maker_agent.py
+│   │   │   ├── sql_validator_agent.py
+│   │   │   ├── followup_agent.py
+│   │   │   ├── conversational_agent.py
+│   │   │   ├── knowledge_base_processor.py
+│   │   │   └── vector_knowledge_base.py
+│   │   └── main.py           # FastAPI app
 │   ├── scripts/
-│   │   └── init_db.py     # Database initialization
+│   │   ├── init_db.py        # Application database initialization
+│   │   ├── build_knowledge_base.py  # Vector KB builder
+│   │   └── seed_users.py     # User seeding
+│   ├── data/
+│   │   ├── vector_db/        # ChromaDB storage
+│   │   └── business_docs/    # Business documents for KB
 │   └── requirements.txt
-├── frontend/              # (To be implemented)
-├── POC_REQUIREMENTS.md    # Detailed requirements
-├── PROJECT_ANALYSIS.md    # Technical analysis
-└── SETUP_GUIDE.md         # Setup instructions
+├── frontend/
+│   ├── src/
+│   │   ├── components/       # React components
+│   │   ├── services/         # API services
+│   │   └── contexts/         # Theme context
+│   └── package.json
+└── README.md
 ```
 
 ## 🔒 Security & Compliance
@@ -160,23 +232,41 @@ AxisGenAI/
 - SQL injection prevention
 - Query validation (SELECT only)
 - Dangerous keyword blocking
-- Audit logging (to be implemented)
+- Schema-driven validation (no hardcoded values)
+- Separate database connections for app and data mart
+- Environment-based configuration
+- Audit logging
 
-## 📝 Next Steps
+## 🚀 Environment Variables
 
-1. ✅ Database schema and synthetic data
-2. ✅ Backend API with predefined queries
-3. ✅ LangChain SQL agent integration
-4. ⏳ React frontend chat interface
-5. ⏳ Enhanced query matching (semantic similarity)
-6. ⏳ Query result caching
-7. ⏳ Performance monitoring
+Key environment variables (see `backend/env.example` for full list):
 
-## 📚 Documentation
+```env
+# Azure OpenAI
+AZURE_OPENAI_API_KEY=your_key
+AZURE_OPENAI_ENDPOINT=https://your-endpoint.openai.azure.com/
+AZURE_OPENAI_CHAT_DEPLOYMENT=gpt-4o
+AZURE_OPENAI_API_VERSION=2025-01-01-preview
 
-- [Setup Guide](SETUP_GUIDE.md) - Detailed setup instructions
-- [POC Requirements](POC_REQUIREMENTS.md) - Question-to-table mapping
-- [Project Analysis](PROJECT_ANALYSIS.md) - Technical architecture
+# Main Application Database
+DB_SERVER=your_server
+DB_NAME=ccm_genai
+DB_USERNAME=your_username
+DB_PASSWORD=your_password
+
+# Knowledge Base Database (Regulatory Data Mart)
+KB_DB_SERVER=your_server  # Optional: defaults to DB_SERVER
+KB_DB_NAME=axis_reg_mart
+KB_DB_USERNAME=your_username  # Optional: defaults to DB_USERNAME
+KB_DB_PASSWORD=your_password  # Optional: defaults to DB_PASSWORD
+```
+
+## 📚 Additional Documentation
+
+- [Architecture Diagram](backend/ARCHITECTURE_DIAGRAM.md) - System and deployment architecture
+- [Agent Architecture](backend/AGENT_ARCHITECTURE.md) - LLM agents and flow
+- [Agent Comparison](backend/AGENT_COMPARISON.md) - SQLMaker vs SQL Validator
+- [Vector KB Setup](backend/VECTOR_KNOWLEDGE_BASE_SETUP.md) - Knowledge base setup guide
 
 ## 🤝 Contributing
 
@@ -184,4 +274,4 @@ This is a POC for internal evaluation. For questions or issues, please refer to 
 
 ## 📄 License
 
-Proprietary - Axis Bank Internal Project
+Proprietary - Internal Project

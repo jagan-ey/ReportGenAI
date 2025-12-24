@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { useUser } from '../contexts/UserContext'
+import { getApprovals, approveRequest, rejectRequest } from '../services/api'
 import './ApprovalsDashboard.css'
 
 function ApprovalsDashboard() {
@@ -18,26 +19,8 @@ function ApprovalsDashboard() {
     setLoading(true)
     try {
       const status = filter === 'all' ? null : filter
-      const url = `http://localhost:8000/api/reports/approvals${status ? `?status=${status}` : ''}`
-      console.log('Fetching approvals from:', url)
-      console.log('User:', user)
-      
-      const response = await fetch(url, {
-        headers: {
-          'X-User-ID': user?.username || 'system',
-          'Content-Type': 'application/json'
-        }
-      })
-      
-      if (response.ok) {
-        const data = await response.json()
-        console.log('Approvals response:', data)
-        setApprovals(data.approvals || [])
-      } else {
-        const errorData = await response.json()
-        console.error('Failed to fetch approvals:', errorData)
-        alert(`Error: ${errorData.detail || 'Failed to fetch approvals'}`)
-      }
+      const data = await getApprovals(user?.username || 'system', status)
+      setApprovals(data.approvals || [])
     } catch (error) {
       console.error('Error fetching approvals:', error)
       alert(`Error: ${error.message}`)
@@ -48,27 +31,11 @@ function ApprovalsDashboard() {
 
   const handleApprove = async (approvalId) => {
     try {
-      const response = await fetch(
-        `http://localhost:8000/api/reports/approvals/${approvalId}/approve`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-User-ID': user?.username || 'system'
-          },
-          body: JSON.stringify({ notes: notes || null })
-        }
-      )
-
-      if (response.ok) {
-        alert('✅ Request approved successfully!')
-        setSelectedApproval(null)
-        setNotes('')
-        fetchApprovals()
-      } else {
-        const error = await response.json()
-        alert(`❌ Error: ${error.detail || 'Failed to approve request'}`)
-      }
+      await approveRequest(approvalId, notes || null, user?.username || 'system')
+      alert('✅ Request approved successfully!')
+      setSelectedApproval(null)
+      setNotes('')
+      fetchApprovals()
     } catch (error) {
       alert(`❌ Error: ${error.message}`)
     }

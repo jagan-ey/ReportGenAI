@@ -1,6 +1,7 @@
 import axios from 'axios'
 
-const API_BASE_URL = 'http://localhost:8000/api'
+// Use environment variable for API base URL, fallback to localhost for development
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api'
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -133,6 +134,49 @@ export const getApprovals = async (userId = 'system', status = null) => {
     return response.data
   } catch (error) {
     throw new Error(error.response?.data?.detail || error.message || 'Failed to load approvals')
+  }
+}
+
+export const getApprovers = async (userId = 'system') => {
+  try {
+    const response = await api.get('/reports/approvers', {
+      headers: {
+        'X-User-ID': userId
+      }
+    })
+    return response.data
+  } catch (error) {
+    throw new Error(error.response?.data?.detail || error.message || 'Failed to load approvers')
+  }
+}
+
+export const approveRequest = async (approvalId, notes = null, userId = 'system') => {
+  try {
+    const response = await api.post(`/reports/approvals/${approvalId}/approve`, {
+      notes
+    }, {
+      headers: {
+        'X-User-ID': userId
+      }
+    })
+    return response.data
+  } catch (error) {
+    throw new Error(error.response?.data?.detail || error.message || 'Failed to approve request')
+  }
+}
+
+export const rejectRequest = async (approvalId, notes, userId = 'system') => {
+  try {
+    const response = await api.post(`/reports/approvals/${approvalId}/reject`, {
+      notes
+    }, {
+      headers: {
+        'X-User-ID': userId
+      }
+    })
+    return response.data
+  } catch (error) {
+    throw new Error(error.response?.data?.detail || error.message || 'Failed to reject request')
   }
 }
 

@@ -24,7 +24,7 @@ def seed_users():
     users = [
         {
             "username": "admin.user",
-            "email": "admin@axisbank.com",
+            "email": "admin@bank.com",
             "password": "admin123",  # In production, use strong passwords
             "full_name": "Admin User",
             "role": "admin",
@@ -32,7 +32,7 @@ def seed_users():
         },
         {
             "username": "approver.user",
-            "email": "approver@axisbank.com",
+            "email": "approver@bank.com",
             "password": "approver123",
             "full_name": "Approver User",
             "role": "approver",
@@ -40,7 +40,7 @@ def seed_users():
         },
         {
             "username": "john.doe",
-            "email": "john.doe@axisbank.com",
+            "email": "john.doe@bank.com",
             "password": "user123",
             "full_name": "John Doe",
             "role": "user",
@@ -48,7 +48,7 @@ def seed_users():
         },
         {
             "username": "jane.smith",
-            "email": "jane.smith@axisbank.com",
+            "email": "jane.smith@bank.com",
             "password": "user123",
             "full_name": "Jane Smith",
             "role": "user",

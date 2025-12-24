@@ -1,9 +1,17 @@
 """
 FollowUp Agent (LLM)
 
-Triggered after SQL is generated (but before execution) to decide if clarification is needed:
-1) Date dimension selection: if source tables contain multiple date columns and the query doesn't specify which to use.
-2) Data freshness confirmation: if tables indicate data is only updated up to an older date than "today".
+An intelligent agent that analyzes user questions and generated SQL queries to identify
+any ambiguities, missing information, or clarifications needed BEFORE executing the query.
+
+The agent can ask ANY type of relevant follow-up question, including but not limited to:
+- Date column selection (when ambiguous)
+- Data freshness confirmation (when data is stale)
+- Filter value clarification (when filters are vague)
+- Join/relationship confirmation (when multiple join paths exist)
+- Aggregation method selection (when ambiguous)
+- Output format preferences
+- Any other clarification needed to ensure accurate query execution
 
 This agent returns a structured follow-up questionnaire (JSON) that the UI can present.
 """
@@ -68,7 +76,32 @@ class FollowUpAgentService:
         if not tables:
             return {"needs_followup": False, "followup_questions": [], "analysis": "No source tables detected."}
 
-        table_date_cols, table_freshness = self._collect_date_metadata(db, tables, today=today)
+        # Validate that all tables actually exist in the database
+        valid_tables = []
+        invalid_tables = []
+        try:
+            from app.services.schema_helper import get_all_tables
+            from app.core.database import get_engine
+            engine = get_engine()
+            actual_tables = set(t.upper() for t in get_all_tables(engine))
+            
+            for table in tables:
+                if table.upper() in actual_tables:
+                    valid_tables.append(table)
+                else:
+                    invalid_tables.append(table)
+                    _logger.warning(f"FollowUp Agent: Table '{table}' does not exist in database")
+        except Exception as e:
+            _logger.warning(f"FollowUp Agent: Could not validate tables: {e}. Proceeding with all tables.")
+            valid_tables = tables
+            invalid_tables = []
+        
+        # If there are invalid tables, add this to schema context for LLM to know
+        if invalid_tables:
+            _logger.warning(f"FollowUp Agent: Found invalid tables in SQL: {invalid_tables}. These will be flagged in the prompt.")
+        
+        # Only process valid tables for date/freshness metadata
+        table_date_cols, table_freshness = self._collect_date_metadata(db, valid_tables, today=today)
         date_cols_used = self._extract_date_columns_used_in_sql(sql_query, table_date_cols)
 
         # Filter freshness metadata to only include tables where lag_days exceeds threshold
@@ -82,9 +115,8 @@ class FollowUpAgentService:
             else:
                 _logger.debug(f"Excluding {table} from freshness check: lag_days={lag_days} (threshold={freshness_threshold})")
 
-        # If we can't compute metadata, do not block execution.
-        if not table_date_cols and not filtered_freshness:
-            return {"needs_followup": False, "followup_questions": [], "analysis": "No date metadata available."}
+        # Get basic schema information for context (even if no date metadata)
+        schema_context = self._get_schema_context(db, tables)
 
         # If LLM not available, do not block (avoid hardcoding behavior).
         self._ensure_initialized()
@@ -94,10 +126,12 @@ class FollowUpAgentService:
         prompt = self._build_prompt(
             question=question,
             sql_query=sql_query,
-            tables=tables,
+            tables=valid_tables,  # Only pass valid tables
+            invalid_tables=invalid_tables,  # Pass invalid tables separately
             table_date_cols=table_date_cols,
             table_freshness=filtered_freshness,  # Use filtered freshness
             date_cols_used=date_cols_used,
+            schema_context=schema_context,
             today=today,
         )
 
@@ -121,97 +155,111 @@ class FollowUpAgentService:
 
     def _system_prompt(self) -> str:
         return (
-            "You are a follow-up question generator for a banking data assistant.\n"
-            "Your job is to decide whether we need to ask the user clarifying questions BEFORE executing SQL.\n"
+            "You are an intelligent follow-up question generator for a banking data assistant.\n"
+            "Your job is to analyze user questions and generated SQL queries to identify ANY ambiguities, "
+            "missing information, or clarifications needed BEFORE executing the SQL query.\n"
             "You must output ONLY valid JSON.\n\n"
-            "When to ask follow-ups:\n"
-            "1) Date dimension ambiguity: If the user's question is time/date-based AND there is ACTUAL ambiguity about which date column to use. Only ask if:\n"
-            "   a) The question is vague (e.g., 'opened recently', 'in the last 3 months' without specifying which date field)\n"
-            "   b) Multiple date columns exist AND the question doesn't explicitly mention a specific date field\n"
-            "   c) The SQL might be using the wrong date column\n"
-            "   DO NOT ask if:\n"
-            "   - The question explicitly mentions a specific date field that matches a column name in the schema\n"
-            "   - The SQL already uses the correct, unambiguous date column that matches the question's intent\n"
-            "2) Data freshness risk: If the user's question is time/date-based (e.g., 'in the last 6 months', 'opened recently', 'current', 'latest') AND the freshness metadata shows lag_days exceeds the threshold (data is significantly stale), you MUST ask a freshness confirmation question. Include the exact max available date and lag days in the question.\n\n"
-            "IMPORTANT:\n"
-            "- Ask date-column question ONLY when: user question is date-based AND there is ACTUAL ambiguity (question doesn't specify which date field, or SQL might be using wrong column).\n"
-            "- Do NOT ask date-column question when:\n"
-            "  * User question is NOT date-based (e.g., tenure, amount, scheme filters only)\n"
-            "  * User question explicitly mentions a specific date field that matches a column name AND SQL uses the correct matching column\n"
-            "  * The question clearly maps to one specific date column based on keyword matching with column names\n"
-            "- Ask freshness question when: user question is time/date-based (contains phrases like 'in the last X months', 'opened', 'recent', 'current', 'latest', 'as of') AND freshness metadata is provided (only tables with lag_days exceeding threshold are included).\n"
-            "- If freshness metadata is empty or not provided, do NOT ask freshness question (data is fresh or within acceptable threshold).\n"
-            "- If you raise a freshness warning, ALWAYS include the exact max available date and the lag vs today (from the provided freshness metadata) in the question text.\n\n"
+            "Your goal is to ensure the query will execute correctly and return the data the user actually wants.\n\n"
+            "Types of follow-up questions you can ask (not limited to these):\n"
+            "1) Date/Time Ambiguity:\n"
+            "   - Multiple date columns exist and the question doesn't specify which one to use\n"
+            "   - The question is vague about time periods (e.g., 'recently', 'last month' without specifics)\n"
+            "   - The SQL might be using the wrong date column\n"
+            "   - Question format: 'Which date column should be used?' with options\n\n"
+            "2) Data Freshness:\n"
+            "   - Data is significantly stale (lag_days exceeds threshold)\n"
+            "   - User's question implies they want current/recent data\n"
+            "   - Question format: 'Data freshness information: Last available data is from YYYY-MM-DD, which is X days old. Do you want to proceed?'\n\n"
+            "3) Filter Value Clarification:\n"
+            "   - Vague filter values (e.g., 'high value', 'recent', 'active' without clear definition)\n"
+            "   - Missing filter values that are needed for accurate results\n"
+            "   - Ambiguous categorical values\n\n"
+            "4) Join/Relationship Confirmation:\n"
+            "   - Multiple possible join paths exist\n"
+            "   - Ambiguity about which tables to join\n"
+            "   - Missing join conditions that might affect results\n\n"
+            "5) Aggregation Method:\n"
+            "   - Question is ambiguous about aggregation (sum, count, average, max, min)\n"
+            "   - Grouping requirements are unclear\n\n"
+            "6) Output Format/Scope:\n"
+            "   - Limit/row count preferences\n"
+            "   - Column selection preferences\n"
+            "   - Sorting preferences\n\n"
+            "7) Any Other Clarification:\n"
+            "   - Any ambiguity that could lead to incorrect or unexpected results\n"
+            "   - Missing information needed to complete the query accurately\n\n"
+            "CRITICAL RULES:\n"
+            "- Ask questions ONLY when there is ACTUAL ambiguity or missing information that could affect results.\n"
+            "- Do NOT ask questions when the intent is clear and unambiguous.\n"
+            "- You can ask MULTIPLE follow-up questions if multiple ambiguities exist.\n"
+            "- Return ALL relevant questions in the 'followup_questions' array.\n"
+            "- Order questions logically (most critical first).\n"
+            "- For date freshness questions, ALWAYS include the exact max available date and lag days from the provided metadata.\n"
+            "- For date column questions, provide ALL available date columns as options.\n"
+            "- CRITICAL: If the payload contains 'invalid_tables_in_sql' with table names, the SQL query uses non-existent tables. "
+            "DO NOT ask questions about these invalid tables (e.g., 'table is empty', 'table has no data'). "
+            "Instead, you may ask if the user meant a different table from the valid tables, or note that the SQL needs correction. "
+            "NEVER reference invalid/non-existent tables in your questions.\n\n"
             "Output format:\n"
             "{\n"
             "  \"needs_followup\": true/false,\n"
             "  \"followup_questions\": [\n"
             "    {\n"
-            "      \"id\": \"date_column\",\n"
-            "      \"question\": \"Which date column should be used?\",\n"
-            "      \"type\": \"date_selection\",\n"
-            "      \"options\": [\"col1\", \"col2\", \"Entire available range\"],\n"
-            "      \"required\": true\n"
+            "      \"id\": \"unique_question_id\",\n"
+            "      \"question\": \"Clear, specific question text\",\n"
+            "      \"type\": \"date_selection|confirmation|text_input|choice|number_input|etc\",\n"
+            "      \"options\": [\"option1\", \"option2\", ...],  // Required for choice/date_selection types\n"
+            "      \"required\": true/false,\n"
+            "      \"default\": \"default_value\"  // Optional\n"
             "    }\n"
             "  ],\n"
-            "  \"analysis\": \"short explanation\"\n"
+            "  \"analysis\": \"Brief explanation of why these questions are needed\"\n"
             "}\n\n"
-            "Few-shot examples:\n"
-            "Example 1 (Ambiguous date question - ASK):\n"
+            "Question Types:\n"
+            "- 'date_selection': User selects from date column options\n"
+            "- 'confirmation': Yes/No question (e.g., data freshness)\n"
+            "- 'text_input': User enters text (e.g., filter values)\n"
+            "- 'choice': User selects from predefined options\n"
+            "- 'number_input': User enters a number (e.g., threshold values)\n"
+            "- Use other types as needed for specific clarifications\n\n"
+            "Analysis Guidelines:\n"
+            "1. Carefully read the user's question and the generated SQL query.\n"
+            "2. Compare them to identify any mismatches, ambiguities, or missing information.\n"
+            "3. Consider the schema context provided - are there multiple ways to interpret the question?\n"
+            "4. Check if date/time information is ambiguous or if data freshness is a concern.\n"
+            "5. Look for vague terms that need clarification (e.g., 'high value', 'recent', 'active').\n"
+            "6. Identify if joins are missing or ambiguous.\n"
+            "7. Determine if aggregation methods are unclear.\n"
+            "8. Only ask questions when clarification is genuinely needed - don't over-question.\n\n"
+            "Examples:\n"
+            "Example 1 (Date ambiguity - ASK):\n"
             "Question: 'Show me all loans opened in the last 3 months'\n"
             "SQL uses: OPENING_DATE\n"
-            "Available columns: ['OPENING_DATE', 'INSERTED_ON', 'LAST_UPDATED_TS'] (example columns)\n"
-            "→ ASK date_column question because question is vague ('opened' could mean OPENING_DATE or INSERTED_ON) and multiple columns exist.\n\n"
-            "Example 1b (Explicit date field - DO NOT ASK):\n"
+            "Available date columns: ['OPENING_DATE', 'INSERTED_ON', 'LAST_UPDATED_TS']\n"
+            "→ ASK date_column question because 'opened' could mean OPENING_DATE or INSERTED_ON.\n\n"
+            "Example 2 (Date ambiguity - DO NOT ASK):\n"
             "Question: 'Customers whose ReKYC due >6 months'\n"
-            "SQL uses: DUE_DATE (matches question keyword 'due')\n"
-            "Available columns: ['DUE_DATE', 'INSERTED_ON', 'LAST_UPDATED_TS'] (example - use actual columns from schema)\n"
-            "→ Do NOT ask date_column question because question explicitly mentions a keyword that matches the column name, and SQL already uses it correctly.\n\n"
-            "Example 1c (Explicit date field - DO NOT ASK):\n"
-            "Question: 'Show me accounts opened in the last 6 months'\n"
-            "SQL uses: OPENING_DATE\n"
-            "Available columns: ['OPENING_DATE', 'INSERTED_ON', 'LAST_UPDATED_TS'] (example columns)\n"
-            "→ Do NOT ask date_column question because 'accounts opened' clearly refers to OPENING_DATE (account opening date), and SQL already uses it correctly.\n\n"
-            "Example 2 (Non-date question):\n"
-            "Question: 'Show me loans with tenure less than 12 months'\n"
-            "SQL uses: TENURE (not a date column)\n"
-            "Available columns: ['OPENING_DATE', 'INSERTED_ON', 'LAST_UPDATED_TS'] (example columns)\n"
-            "→ Do NOT ask date_column question because user question is NOT date-based.\n\n"
-            "Example 3 (Freshness warning - CRITICAL):\n"
-            "Question: 'Show me all accounts opened in the last 6 months'\n"
-            "Freshness metadata: {'table_name': {'max_value': '2025-01-15 10:30:00', 'lag_days': 5, 'column': 'audit_column'}}\n"
-            "→ MUST ASK freshness question because:\n"
-            "  1. Question is time-based ('in the last 6 months')\n"
-            "  2. lag_days = 5 (exceeds threshold, data is significantly stale)\n"
-            "  3. Freshness metadata is provided (only tables exceeding threshold are included)\n"
-            "Question format: 'Data freshness information: Last available data is from 2025-01-15, which is 5 days old. Do you want to proceed?'\n"
-            "Type: 'confirmation'\n"
-            "ID: 'data_freshness'\n\n"
-            "Example 4 (Both date column AND freshness - but only if ambiguous):\n"
-            "Question: 'Show me all accounts opened in the last 6 months'\n"
-            "SQL uses: OPENING_DATE\n"
-            "Available columns: ['OPENING_DATE', 'INSERTED_ON', 'LAST_UPDATED_TS'] (example columns)\n"
-            "Freshness metadata: {'table_name': {'max_value': '2025-01-15', 'lag_days': 5}}\n"
-            "→ ASK ONLY freshness (NOT date column) because:\n"
-            "  1. Question mentions 'accounts opened' which clearly maps to OPENING_DATE, and SQL uses it correctly\n"
-            "  2. No ambiguity exists - DO NOT ask date column question\n"
-            "  3. Freshness confirmation (lag_days = 5 > 0) - ASK this\n\n"
-            "Example 4b (Ambiguous date + freshness - ASK BOTH):\n"
+            "SQL uses: RE_KYC_DUE_DATE (matches question keyword 'due')\n"
+            "→ Do NOT ask - question explicitly mentions 'ReKYC due' which clearly maps to RE_KYC_DUE_DATE.\n\n"
+            "Example 3 (Freshness - ASK):\n"
+            "Question: 'Show me all current accounts'\n"
+            "Freshness: {'table_name': {'max_value': '2025-01-15', 'lag_days': 5}}\n"
+            "→ ASK freshness question because 'current' implies recent data, but data is 5 days old.\n\n"
+            "Example 4 (Multiple ambiguities - ASK BOTH):\n"
             "Question: 'Show me all records from the last 6 months'\n"
             "SQL uses: INSERTED_ON\n"
-            "Available columns: ['OPENING_DATE', 'INSERTED_ON', 'LAST_UPDATED_TS'] (example columns)\n"
-            "Freshness metadata: {'table_name': {'max_value': '2025-01-15', 'lag_days': 5}}\n"
-            "→ ASK BOTH:\n"
-            "  1. Date column selection (question is vague - 'records' doesn't specify which date field)\n"
-            "  2. Freshness confirmation (lag_days = 5 > 0)\n\n"
-            "Example 5 (Freshness below threshold):\n"
-            "Question: 'Show me all accounts opened in the last 6 months'\n"
-            "Freshness metadata: {} (empty - lag_days = 1 is below threshold of 3 days)\n"
-            "→ Do NOT ask freshness question because freshness metadata is empty (data is within acceptable threshold).\n\n"
-            "Example 6 (Freshness with no lag):\n"
-            "Question: 'Show me all accounts opened in the last 6 months'\n"
-            "Freshness metadata: {} (empty - lag_days = 0 or None)\n"
-            "→ Do NOT ask freshness question because freshness metadata is empty (data is current).\n"
+            "Available date columns: ['OPENING_DATE', 'INSERTED_ON', 'LAST_UPDATED_TS']\n"
+            "Freshness: {'table_name': {'max_value': '2025-01-15', 'lag_days': 5}}\n"
+            "→ ASK BOTH date column selection AND freshness confirmation.\n\n"
+            "Example 5 (No ambiguity - DO NOT ASK):\n"
+            "Question: 'Show me loans with tenure less than 12 months'\n"
+            "SQL uses: TENURE column correctly\n"
+            "→ Do NOT ask - question is clear and SQL matches intent.\n\n"
+            "Example 6 (Vague filter - ASK):\n"
+            "Question: 'Show me high value loans'\n"
+            "SQL uses: BALANCE > 1000000 (assumed threshold)\n"
+            "→ ASK for clarification: 'What amount threshold should be used for high value loans?'\n"
+            "Type: 'number_input' or 'choice' with options like ['> 1M', '> 5M', '> 10M']\n\n"
         )
 
     def _build_prompt(
@@ -220,25 +268,22 @@ class FollowUpAgentService:
         question: str,
         sql_query: str,
         tables: List[str],
+        invalid_tables: List[str],
         table_date_cols: Dict[str, List[str]],
         table_freshness: Dict[str, Dict[str, Any]],
         date_cols_used: List[str],
+        schema_context: Dict[str, Any],
         today: _dt.date,
     ) -> str:
         # Dynamically find date columns that match question keywords
-        # Instead of hardcoded mappings, we'll use the actual date columns from tables
         question_lower = question.lower()
         explicit_date_field = None
         
         # Look for date columns in the tables that match question keywords
-        # This is generic - works for any date columns, not just hardcoded ones
         for table, date_cols in table_date_cols.items():
             for col in date_cols:
                 col_lower = col.lower()
-                # Check if column name contains keywords from question
-                # Generic matching: if question mentions something that matches column name pattern
                 if any(keyword in col_lower for keyword in question_lower.split() if len(keyword) > 3):
-                    # Found a potential match - use it
                     explicit_date_field = col
                     break
             if explicit_date_field:
@@ -246,25 +291,37 @@ class FollowUpAgentService:
         
         # If no match found, check if SQL already uses a date column that seems relevant
         if not explicit_date_field and date_cols_used:
-            # Use the first date column that's already in the SQL
             explicit_date_field = date_cols_used[0]
         
+        # Build comprehensive context for the LLM
         payload = {
-            "question": question,
-            "sql_query": sql_query,
-            "source_tables": tables,
-            "candidate_date_columns": table_date_cols,
-            "date_columns_used_in_sql": date_cols_used,
-            "freshness": table_freshness,
+            "user_question": question,
+            "generated_sql_query": sql_query,
+            "source_tables": tables,  # Valid tables only
+            "invalid_tables_in_sql": invalid_tables,  # Tables that don't exist in database
+            "schema_context": schema_context,  # Table schemas, columns, relationships
+            "date_metadata": {
+                "candidate_date_columns": table_date_cols,
+                "date_columns_used_in_sql": date_cols_used,
+                "explicit_date_field_mentioned": explicit_date_field,
+            },
+            "freshness_metadata": table_freshness,
             "today": str(today),
-            "explicit_date_field_mentioned": explicit_date_field,  # Add this hint
-            "guidance": (
-                "If the question explicitly mentions a specific date field that matches a column name "
-                "AND the SQL already uses that correct column, "
-                "DO NOT ask for date column selection - there is no ambiguity."
-            ) if explicit_date_field else None,
+            "analysis_guidance": (
+                "Analyze the user question and SQL query for ANY ambiguities, missing information, "
+                "or clarifications needed. Consider:\n"
+                "- Date/time ambiguities\n"
+                "- Data freshness concerns\n"
+                "- Vague filter values\n"
+                "- Missing or ambiguous joins\n"
+                "- Unclear aggregation methods\n"
+                "- CRITICAL: If 'invalid_tables_in_sql' contains table names, the SQL query uses non-existent tables. "
+                "You should NOT ask questions about these invalid tables (e.g., 'table is empty'). "
+                "Instead, you may ask if the user meant a different table from the valid tables list, or flag that the SQL needs correction.\n"
+                "- Any other aspects that could lead to incorrect or unexpected results\n"
+            ),
         }
-        return json.dumps(payload, ensure_ascii=False)
+        return json.dumps(payload, ensure_ascii=False, indent=2)
 
     def _safe_json(self, txt: str) -> Any:
         try:
@@ -443,5 +500,118 @@ class FollowUpAgentService:
 
         used_sorted = sorted(set(used))
         return used_sorted
+
+    def _get_schema_context(self, db: Session, tables: List[str]) -> Dict[str, Any]:
+        """
+        Get schema context for the tables used in the query.
+        This helps the LLM identify ambiguities, missing joins, etc.
+        """
+        if not tables:
+            return {}
+        
+        schema_info = {}
+        
+        try:
+            # Get column information for each table
+            cols_q = text(
+                """
+                SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = 'dbo'
+                  AND TABLE_NAME IN :tables
+                ORDER BY TABLE_NAME, ORDINAL_POSITION
+                """
+            ).bindparams(bindparam("tables", expanding=True))
+            
+            rows = db.execute(cols_q, {"tables": list(tables)}).fetchall()
+            
+            # Group by table
+            by_table: Dict[str, List[Dict[str, str]]] = {}
+            for t, c, dt, nullable, default in rows:
+                if t not in by_table:
+                    by_table[t] = []
+                by_table[t].append({
+                    "column": c,
+                    "data_type": dt or "",
+                    "nullable": nullable or "",
+                    "default": default or "",
+                })
+            
+            # Get primary key information
+            pk_q = text(
+                """
+                SELECT TABLE_NAME, COLUMN_NAME
+                FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+                WHERE TABLE_SCHEMA = 'dbo'
+                  AND TABLE_NAME IN :tables
+                  AND CONSTRAINT_NAME IN (
+                      SELECT CONSTRAINT_NAME
+                      FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS
+                      WHERE CONSTRAINT_TYPE = 'PRIMARY KEY'
+                        AND TABLE_SCHEMA = 'dbo'
+                        AND TABLE_NAME IN :tables
+                  )
+                ORDER BY TABLE_NAME, ORDINAL_POSITION
+                """
+            ).bindparams(bindparam("tables", expanding=True))
+            
+            pk_rows = db.execute(pk_q, {"tables": list(tables)}).fetchall()
+            pk_by_table: Dict[str, List[str]] = {}
+            for t, c in pk_rows:
+                if t not in pk_by_table:
+                    pk_by_table[t] = []
+                pk_by_table[t].append(c)
+            
+            # Get foreign key relationships (potential join paths)
+            fk_q = text(
+                """
+                SELECT 
+                    fk.TABLE_NAME AS FK_TABLE,
+                    fk.COLUMN_NAME AS FK_COLUMN,
+                    pk.TABLE_NAME AS PK_TABLE,
+                    pk.COLUMN_NAME AS PK_COLUMN
+                FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc
+                JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE fk
+                    ON rc.CONSTRAINT_NAME = fk.CONSTRAINT_NAME
+                    AND rc.CONSTRAINT_SCHEMA = fk.CONSTRAINT_SCHEMA
+                JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE pk
+                    ON rc.UNIQUE_CONSTRAINT_NAME = pk.CONSTRAINT_NAME
+                    AND rc.UNIQUE_CONSTRAINT_SCHEMA = pk.CONSTRAINT_SCHEMA
+                WHERE fk.TABLE_SCHEMA = 'dbo'
+                  AND (fk.TABLE_NAME IN :tables OR pk.TABLE_NAME IN :tables)
+                """
+            ).bindparams(bindparam("tables", expanding=True))
+            
+            fk_rows = db.execute(fk_q, {"tables": list(tables)}).fetchall()
+            relationships = []
+            for fk_t, fk_c, pk_t, pk_c in fk_rows:
+                relationships.append({
+                    "from_table": fk_t,
+                    "from_column": fk_c,
+                    "to_table": pk_t,
+                    "to_column": pk_c,
+                })
+            
+            # Build schema context
+            schema_info = {
+                "tables": {},
+                "relationships": relationships,
+            }
+            
+            for table in tables:
+                schema_info["tables"][table] = {
+                    "columns": by_table.get(table, []),
+                    "primary_keys": pk_by_table.get(table, []),
+                }
+        
+        except Exception as e:
+            _logger.warning(f"Could not fetch full schema context: {e}")
+            # Return minimal context
+            schema_info = {
+                "tables": {t: {"columns": [], "primary_keys": []} for t in tables},
+                "relationships": [],
+            }
+        
+        return schema_info
 
 

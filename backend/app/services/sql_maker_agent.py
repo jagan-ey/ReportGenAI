@@ -63,6 +63,18 @@ class SQLMakerAgent:
         except Exception as e:
             schema_info = ""
             _logger.warning(f"SQLMaker could not load schema info: {e}")
+        
+        # Get actual table list from database to enforce strict table usage
+        actual_tables = []
+        try:
+            from app.services.schema_helper import get_all_tables
+            from app.core.database import get_engine
+            engine = get_engine()
+            actual_tables = get_all_tables(engine)
+            _logger.debug(f"SQLMaker: Found {len(actual_tables)} actual tables in database")
+        except Exception as e:
+            _logger.warning(f"SQLMaker could not get actual table list: {e}")
+            actual_tables = []
 
         # Get domain knowledge context from vector knowledge base (lazy initialization)
         domain_knowledge = None
@@ -205,10 +217,23 @@ class SQLMakerAgent:
                 "- Use the domain knowledge and schema information provided to understand valid values, business meanings, and relationships.\n"
                 "- Use exact column names from the schema - do not guess or use aliases that don't exist.\n"
                 "- If the request is ambiguous, make a reasonable assumption and still produce SQL.\n\n"
+                "CRITICAL TABLE SELECTION RULES:\n"
+                "- Use domain knowledge and schema information to identify the correct table type based on the user's question.\n"
+                "- When user asks for specific entity types, use the schema and domain knowledge to find the appropriate tables.\n"
+                "- Domain knowledge will provide business synonyms and table descriptions to help you match user's intent to the correct tables.\n"
+                "- Example: If user asks for 'loan accounts', use domain knowledge to find tables related to loans, not other account types.\n"
+                "- Example: If user asks for 'customer details', use domain knowledge to find customer-related tables and join them.\n\n"
                 "IMPORTANT QUERYING RULES:\n"
                 "- Use the schema information to determine which tables and columns to use.\n"
-                "- Only join tables when necessary - prefer direct queries when possible.\n"
-                "- Use domain knowledge to understand relationships between tables.\n"
+                "- JOIN tables when:\n"
+                "  * User explicitly asks for related data (e.g., 'accounts with customer details', 'loans with customer info')\n"
+                "  * User asks for data from multiple entities (e.g., 'accounts and their owners', 'loans and customers')\n"
+                "  * The question requires data that spans multiple tables to be meaningful\n"
+                "- Only use direct queries (no joins) when:\n"
+                "  * User asks for data from a single table only\n"
+                "  * All required columns exist in one table\n"
+                "- Use domain knowledge and schema information to understand relationships between tables (look for common join keys like ID columns, foreign keys in the schema).\n"
+                "- When joining, include relevant columns from ALL joined tables to provide rich, complete results.\n"
                 "- Match column names exactly as they appear in the schema.\n"
             )
         else:
@@ -217,7 +242,9 @@ class SQLMakerAgent:
                 "You are SQLMaker, a specialist at writing SQL Server (T-SQL) SELECT queries.\n"
                 "You MUST follow these rules:\n"
                 "- Only generate a single SQL SELECT statement.\n"
-                "- Use ONLY the tables available in the database schema provided.\n"
+                "- CRITICAL: Use ONLY the EXACT table names and column names from the database schema provided below.\n"
+                "- NEVER invent, guess, or create table/column names (e.g., do NOT use 'LoanAccounts', 'Customers', 'LoanAccountID', 'CustomerID', 'FirstName', 'LastName' - these are generic examples, NOT actual table/column names).\n"
+                "- ALWAYS use the exact table and column names as they appear in the schema information provided.\n"
                 "- Do NOT use markdown fences (no ```).\n"
                 "- Do NOT use backticks.\n"
                 "- Do NOT include explanations.\n"
@@ -226,11 +253,27 @@ class SQLMakerAgent:
                 "- Include contextually relevant columns that would be useful in a business report.\n"
                 "- Use the domain knowledge and schema information provided to understand valid values, business meanings, and relationships.\n"
                 "- Use exact column names from the schema - do not guess or use aliases that don't exist.\n"
-                "- If the request is ambiguous, make a reasonable assumption and still produce SQL.\n\n"
+                "- If the request is ambiguous, make a reasonable assumption and still produce SQL using actual schema tables/columns.\n\n"
+                "CRITICAL TABLE SELECTION RULES:\n"
+                "- You MUST use ONLY tables that exist in the database. A list of ACTUAL table names will be provided below.\n"
+                "- NEVER invent, guess, or create table names (e.g., do NOT use 'customer_dim', 'loan_dim', 'account_dim' - these are generic examples, NOT actual table names).\n"
+                "- Use domain knowledge and schema information to identify the correct table type based on the user's question.\n"
+                "- When user asks for specific entity types, use the schema and domain knowledge to find the appropriate tables FROM THE ACTUAL TABLE LIST.\n"
+                "- Domain knowledge will provide business synonyms and table descriptions to help you match user's intent to the correct tables.\n"
+                "- Example: If user asks for 'loan accounts', use domain knowledge to find tables related to loans FROM THE ACTUAL TABLE LIST.\n"
+                "- Example: If user asks for 'customer details', use domain knowledge to find customer-related tables FROM THE ACTUAL TABLE LIST and join them.\n"
+                "- If a table name is NOT in the actual table list, you MUST NOT use it - find an alternative from the actual list.\n\n"
                 "IMPORTANT QUERYING RULES:\n"
                 "- Use the schema information to determine which tables and columns to use.\n"
-                "- Only join tables when necessary - prefer direct queries when possible.\n"
-                "- Use domain knowledge to understand relationships between tables.\n"
+                "- JOIN tables when:\n"
+                "  * User explicitly asks for related data (e.g., 'accounts with customer details', 'loans with customer info')\n"
+                "  * User asks for data from multiple entities (e.g., 'accounts and their owners', 'loans and customers')\n"
+                "  * The question requires data that spans multiple tables to be meaningful\n"
+                "- Only use direct queries (no joins) when:\n"
+                "  * User asks for data from a single table only\n"
+                "  * All required columns exist in one table\n"
+                "- Use domain knowledge and schema information to understand relationships between tables (look for common join keys like ID columns, foreign keys in the schema).\n"
+                "- When joining, include relevant columns from ALL joined tables to provide rich, complete results.\n"
                 "- Match column names exactly as they appear in the schema.\n"
             )
 
@@ -273,8 +316,31 @@ class SQLMakerAgent:
         if domain_knowledge:
             user_prompt_parts.append(f"Domain Knowledge:\n{domain_knowledge[:3000]}\n")  # Limit domain knowledge to 3000 chars
         
-        user_prompt_parts.append(f"Database schema (truncated):\n{(schema_info or '')[:2000]}\n")  # Reduce schema to 2000 to make room for domain knowledge
-        user_prompt_parts.append("\nReturn ONLY the SQL query text.")
+        # Add ACTUAL table list with STRICT enforcement
+        if actual_tables:
+            user_prompt_parts.append(
+                f"\n{'='*80}\n"
+                f"CRITICAL: ACTUAL TABLES IN DATABASE (USE ONLY THESE - DO NOT INVENT OTHERS):\n"
+                f"{'='*80}\n"
+                f"{', '.join(sorted(actual_tables))}\n"
+                f"{'='*80}\n"
+                f"\nSTRICT RULE: You MUST use ONLY table names from the list above. "
+                f"If you need a table that is NOT in this list, you MUST find an alternative from this list. "
+                f"NEVER invent table names like 'customer_dim', 'loan_dim', etc. - use the EXACT names from the list above.\n\n"
+            )
+        
+        # Increase schema info limit to ensure LLM has enough context
+        schema_context = schema_info or ""
+        user_prompt_parts.append(f"Database schema (CRITICAL - USE EXACT TABLE AND COLUMN NAMES FROM HERE):\n{schema_context[:5000]}\n")  # Increased to 5000 chars
+        user_prompt_parts.append(
+            "\nCRITICAL REMINDER:\n"
+            "- The schema above contains the ACTUAL table names and column names in the database.\n"
+            "- You MUST use ONLY these exact names - do NOT invent generic names.\n"
+            "- Use the EXACT table and column names as they appear in the schema provided above.\n"
+            "- Domain knowledge will help you understand which tables/columns to use, but you must use the EXACT names from the schema.\n"
+            "- If a table name is NOT in the actual table list provided above, you MUST NOT use it.\n\n"
+            "Return ONLY the SQL query text."
+        )
         
         user_prompt = "\n".join(user_prompt_parts)
 
@@ -335,22 +401,58 @@ class SQLMakerAgent:
             domain_knowledge = ""
             _logger.warning(f"SQLMaker could not load domain knowledge for repair: {e}")
         
+        # Get actual table list for repair prompt too
+        actual_tables_repair = []
+        try:
+            from app.services.schema_helper import get_all_tables
+            from app.core.database import get_engine
+            engine = get_engine()
+            actual_tables_repair = get_all_tables(engine)
+        except Exception as e:
+            _logger.debug(f"Could not get actual table list for repair: {e}")
+            actual_tables_repair = []
+        
         prompt_parts = [
             "Your previous SQL draft was rejected. Fix it.\n",
             "You MUST return ONLY a single valid SQL Server SELECT query.\n",
-            "Constraints:\n",
+            "CRITICAL RULES:\n",
+            "- Use ONLY the EXACT table names and column names from the database schema provided below.\n",
+            "- NEVER invent, guess, or create table/column names (e.g., do NOT use 'LoanAccounts', 'Customers', 'LoanAccountID', 'CustomerID', 'FirstName', 'LastName').\n",
+            "- ALWAYS use the exact table and column names as they appear in the schema information.\n",
             "- Only use tables from the provided schema.\n",
             "- No markdown, no backticks, no explanations.\n",
             "- Use TOP not LIMIT.\n",
-            "- Use exact valid values from domain knowledge.\n\n",
+            "- Use exact valid values from domain knowledge.\n",
+            "- Use domain knowledge and schema information to identify the correct tables based on the user's question.\n",
+            "- When user asks for related data (e.g., 'customer details', 'account owner info'), you MUST join with the appropriate related tables to get complete information.\n",
+            "- JOIN tables when user explicitly requests related data from multiple entities.\n",
+            "- Include relevant columns from ALL joined tables to provide complete results.\n\n",
             f"User question:\n{question}\n\n"
         ]
         
         if domain_knowledge:
             prompt_parts.append(f"Domain Knowledge:\n{domain_knowledge[:2000]}\n\n")
         
+        # Add actual table list to repair prompt
+        if actual_tables_repair:
+            prompt_parts.append(
+                f"\n{'='*80}\n"
+                f"CRITICAL: ACTUAL TABLES IN DATABASE (USE ONLY THESE - DO NOT INVENT OTHERS):\n"
+                f"{'='*80}\n"
+                f"{', '.join(sorted(actual_tables_repair))}\n"
+                f"{'='*80}\n"
+                f"\nSTRICT RULE: You MUST use ONLY table names from the list above. "
+                f"If you need a table that is NOT in this list, you MUST find an alternative from this list. "
+                f"NEVER invent table names like 'customer_dim', 'loan_dim', etc. - use the EXACT names from the list above.\n\n"
+            )
+        
         prompt_parts.extend([
-            f"Schema (truncated):\n{(schema_info or '')[:2000]}\n\n",
+            f"Database schema (CRITICAL - USE EXACT TABLE AND COLUMN NAMES FROM HERE):\n{(schema_info or '')[:5000]}\n\n",
+            "CRITICAL REMINDER:\n"
+            "- The schema above contains the ACTUAL table names and column names in the database.\n"
+            "- You MUST use ONLY these exact names - do NOT invent generic names.\n"
+            "- Use the EXACT table and column names as they appear in the schema.\n"
+            "- If a table name is NOT in the actual table list provided above, you MUST NOT use it.\n\n",
             f"Previous SQL draft:\n{bad_sql}\n\n",
             f"Why it failed:\n{failure_reason}\n\n",
             "Return the corrected SQL now:"

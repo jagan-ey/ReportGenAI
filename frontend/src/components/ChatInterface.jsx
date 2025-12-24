@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { sendQuery } from '../services/api'
+import { sendQuery, sendForApproval, scheduleReport } from '../services/api'
 import { useUser } from '../contexts/UserContext'
 import ApproverModal from './ApproverModal'
 import SpeechToText from './SpeechToText'
@@ -249,28 +249,15 @@ function ChatInterface({ initialQuestion, onQuestionSent }) {
         ? messages.slice(0, messageIndex).reverse().find(m => m.type === 'user')?.content 
         : 'Unknown query'
 
-      const response = await fetch('http://localhost:8000/api/reports/send-approval', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-User-ID': user?.username || 'system'
-        },
-        body: JSON.stringify({
-          query: pendingApprovalMessage.sqlQuery,
-          data: pendingApprovalMessage.data,
-          row_count: pendingApprovalMessage.rowCount,
-          question: userQuestion,
-          approver_email: approver.email
-        })
-      })
+      const result = await sendForApproval({
+        query: pendingApprovalMessage.sqlQuery,
+        data: pendingApprovalMessage.data,
+        row_count: pendingApprovalMessage.rowCount,
+        question: userQuestion,
+        approver_email: approver.email
+      }, user?.username || 'system')
 
-      if (response.ok) {
-        const result = await response.json()
-        alert(`✅ Report sent for approval successfully!\n\nApproval ID: ${result.approval_id || 'N/A'}\nApprover: ${approver.name}\nStatus: Pending Review`)
-      } else {
-        const error = await response.json()
-        throw new Error(error.detail || 'Failed to send for approval')
-      }
+      alert(`✅ Report sent for approval successfully!\n\nApproval ID: ${result.approval_id || 'N/A'}\nApprover: ${approver.name}\nStatus: Pending Review`)
     } catch (error) {
       alert(`❌ Error sending for approval: ${error.message}`)
     } finally {
@@ -298,27 +285,22 @@ function ChatInterface({ initialQuestion, onQuestionSent }) {
       const types = { '1': 'daily', '2': 'weekly', '3': 'monthly' }
       const selectedType = types[scheduleType]
 
-      const response = await fetch('http://localhost:8000/api/reports/schedule', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-User-ID': user?.username || 'system'
-        },
-        body: JSON.stringify({
-          query: message.sqlQuery,
-          question: userQuestion,
-          schedule_type: selectedType,
-          enabled: true
-        })
-      })
-
-      if (response.ok) {
-        const result = await response.json()
-        alert(`✅ Report scheduled successfully!\n\nSchedule ID: ${result.schedule_id}\nFrequency: ${result.schedule_type}\nStatus: Active`)
-      } else {
-        const error = await response.json()
-        throw new Error(error.detail || 'Failed to schedule report')
+      const scheduleTime = prompt('Enter schedule time (HH:MM format, e.g., 09:00):')
+      if (!scheduleTime || !/^\d{2}:\d{2}$/.test(scheduleTime)) {
+        alert('Invalid time format. Please use HH:MM format.')
+        return
       }
+
+      const result = await scheduleReport({
+        query: message.sqlQuery,
+        data: message.data,
+        row_count: message.rowCount,
+        question: userQuestion,
+        schedule_type: selectedType,
+        schedule_time: scheduleTime
+      }, user?.username || 'system')
+
+      alert(`✅ Report scheduled successfully!\n\nSchedule ID: ${result.schedule_id}\nFrequency: ${result.schedule_type}\nStatus: Active`)
     } catch (error) {
       alert(`❌ Error scheduling report: ${error.message}`)
     }

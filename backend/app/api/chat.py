@@ -3,12 +3,36 @@ Chat API endpoints for Talk to Data functionality
 """
 import logging
 import re
+import os
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.config import settings
+
+# Setup dedicated logger for SQL validation debugging
+_log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'logs')
+os.makedirs(_log_dir, exist_ok=True)
+
+_log_file = os.path.join(_log_dir, f'sql_validator_debug_{datetime.now().strftime("%Y%m%d")}.log')
+_validator_file_handler = logging.FileHandler(_log_file, mode='a', encoding='utf-8')
+_validator_file_handler.setLevel(logging.DEBUG)
+
+_formatter = logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+_validator_file_handler.setFormatter(_formatter)
+
+# Create validator logger
+_validator_logger = logging.getLogger('sql_validator_debug')
+_validator_logger.setLevel(logging.DEBUG)
+_validator_logger.handlers.clear()  # Remove existing handlers
+_validator_logger.addHandler(_validator_file_handler)
+if settings.DEBUG:
+    _validator_logger.addHandler(logging.StreamHandler())
 
 _logger = logging.getLogger(__name__)
 
@@ -25,6 +49,72 @@ def _get_biu_spoc_message() -> str:
         f"- **Phone:** {settings.BIU_SPOC_PHONE} ({settings.BIU_SPOC_EXTENSION})\n\n"
         f"The BIU team can help you create custom queries with the specific fields you need."
     )
+
+
+def _check_semantic_mismatch(original_question: str, corrected_sql: str) -> bool:
+    """
+    Use LLM to check if the corrected SQL uses columns that don't semantically match the user's question.
+    Returns True if there's a semantic mismatch (should show BIU SPOC message).
+    
+    This is generic and works for any domain - uses LLM to understand semantic meaning.
+    """
+    try:
+        from langchain_openai import AzureChatOpenAI
+        from langchain_core.messages import HumanMessage, SystemMessage
+        import re
+        
+        # Extract column names from corrected SQL
+        sql_upper = corrected_sql.upper()
+        column_pattern = r'\b([A-Z_][A-Z0-9_]*)\b'
+        sql_columns = re.findall(column_pattern, sql_upper)
+        sql_columns_str = ', '.join(set(sql_columns))  # Remove duplicates
+        
+        if not sql_columns_str:
+            return False
+        
+        # Initialize LLM (lazy, only when needed)
+        llm = AzureChatOpenAI(
+            azure_endpoint=settings.AZURE_ENDPOINT,
+            api_key=settings.OPENAI_API_KEY,
+            api_version=settings.AZURE_API_VERSION,
+            deployment_name=settings.AZURE_DEPLOYMENT_NAME,
+            temperature=0.0,
+        )
+        
+        system_prompt = (
+            "You are a semantic analysis expert. Your job is to determine if a SQL query's columns "
+            "semantically match what the user asked for in their question.\n\n"
+            "Return ONLY 'YES' if the columns in the SQL semantically match the user's question, "
+            "or 'NO' if there's a semantic mismatch (e.g., user asks for 'credit score' but SQL uses 'sanction limit').\n\n"
+            "Be strict: Only return 'NO' if there's a clear semantic mismatch. "
+            "If the columns are related or could reasonably answer the question, return 'YES'."
+        )
+        
+        user_prompt = (
+            f"User's question: {original_question}\n\n"
+            f"Columns used in corrected SQL: {sql_columns_str}\n\n"
+            f"Does the SQL query semantically match what the user asked for? Answer YES or NO only."
+        )
+        
+        response = llm.invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt)
+        ])
+        
+        answer = response.content.strip().upper() if hasattr(response, 'content') else str(response).strip().upper()
+        
+        # Check if LLM detected a mismatch
+        is_mismatch = answer.startswith('NO')
+        
+        if is_mismatch:
+            _logger.warning(f"⚠️ Semantic mismatch detected by LLM: Question asks for '{original_question}' but SQL uses columns: {sql_columns_str}")
+        
+        return is_mismatch
+        
+    except Exception as e:
+        _logger.warning(f"⚠️ Could not check semantic mismatch using LLM: {e}. Assuming no mismatch.")
+        # If LLM check fails, don't block - assume no mismatch
+        return False
 
 
 def _simplify_query_remove_unnecessary_join(sql: str, question: str) -> Optional[str]:
@@ -314,10 +404,15 @@ async def chat_query(request: ChatRequest, db: Session = Depends(get_db)):
             )
 
         # 3) Report/Data query -> SQLMaker (LLM generates SQL) + execute
+        _validator_logger.info("=" * 80)
+        _validator_logger.info(f"🔍 NEW QUERY REQUEST: {request.question}")
+        _validator_logger.info("=" * 80)
+        
         sql_agent = get_sql_agent()
         sql_query = None
 
         # Try SQLMaker first
+        _validator_logger.info("📝 Step 1: Calling SQLMaker Agent...")
         sql_maker = _get_sql_maker(db_url)
         maker_res = sql_maker.generate_sql(
             request.question,
@@ -326,16 +421,22 @@ async def chat_query(request: ChatRequest, db: Session = Depends(get_db)):
         used_agent = "sqlmaker"
         if maker_res.get("success"):
             sql_query = maker_res.get("sql_query")
+            _validator_logger.info(f"✅ SQLMaker generated SQL (attempt {maker_res.get('attempt', 1)}):")
+            _validator_logger.info(f"SQL: {sql_query}")
             if maker_res.get("attempt") == 2:
                 used_agent = "sqlmaker_repair"
         else:
+            _validator_logger.warning(f"❌ SQLMaker failed: {maker_res.get('error', 'Unknown error')}")
             # Fallback to existing multi-agent system for robustness
             multi_agent = _get_multi_agent(db_url)
             fallback_res = multi_agent.execute_query(request.question)
             sql_query = fallback_res.get("sql_query")
             used_agent = "multi_agent"
+            if sql_query:
+                _validator_logger.info(f"✅ Multi-agent fallback generated SQL: {sql_query}")
 
         if not sql_query:
+            _validator_logger.error("❌ No SQL query generated by any agent")
             return ChatResponse(
                 answer="Error: Unable to generate SQL query. Please try rephrasing your question or use a predefined query.",
                 sql_query=None,
@@ -349,7 +450,10 @@ async def chat_query(request: ChatRequest, db: Session = Depends(get_db)):
             )
 
         cleaned_sql = sql_agent._clean_sql_string(sql_query) if hasattr(sql_agent, "_clean_sql_string") else sql_query
+        _validator_logger.info(f"📝 Step 2: Cleaned SQL: {cleaned_sql}")
+        
         if not sql_agent.validate_sql(cleaned_sql):
+            _validator_logger.error("❌ SQL validation failed - unsafe operations detected")
             return ChatResponse(
                 answer="Generated SQL query contains unsafe operations and was blocked for security.",
                 sql_query=cleaned_sql,
@@ -362,14 +466,18 @@ async def chat_query(request: ChatRequest, db: Session = Depends(get_db)):
                 route_reason=decision.get("reason"),
             )
         
+        _validator_logger.info("✅ SQL passed safety validation")
+        
         # SQL Validator Agent: Will be initialized only if SQLMaker's SQL fails during execution (fallback)
         # Do NOT call validator here - let SQLMaker's SQL execute first
 
         # FollowUp Agent (before execution)
         if not request.skip_followups:
+            _validator_logger.info("📝 Step 3: Checking FollowUp Agent...")
             followup_agent = _get_followup_agent()
             followup = followup_agent.analyze(db=db, question=request.question, sql_query=cleaned_sql)
             if followup.get("needs_followup"):
+                _validator_logger.info("⚠️ FollowUp Agent requested clarification - returning early")
                 return ChatResponse(
                     answer="I need a quick clarification before running this report.",
                     sql_query=cleaned_sql,
@@ -384,10 +492,13 @@ async def chat_query(request: ChatRequest, db: Session = Depends(get_db)):
                     followup_questions=followup.get("followup_questions", []),
                     followup_analysis=followup.get("analysis", ""),
                 )
+            _validator_logger.info("✅ FollowUp Agent - no clarification needed")
 
+        _validator_logger.info("📝 Step 4: Executing SQL query...")
         try:
             from sqlalchemy import text
             db_result = db.execute(text(cleaned_sql))
+            _validator_logger.info("✅ SQL execution successful!")
             rows = db_result.fetchall()
             columns = db_result.keys()
             data = [dict(zip(columns, row)) for row in rows]
@@ -443,74 +554,164 @@ async def chat_query(request: ChatRequest, db: Session = Depends(get_db)):
             )
         except Exception as e:
             error_str = str(e)
+            _validator_logger.error("=" * 80)
+            _validator_logger.error(f"❌ SQL EXECUTION FAILED!")
+            _validator_logger.error(f"Error: {error_str}")
+            _validator_logger.error("=" * 80)
+            _logger.error(f"SQL execution error caught: {error_str}")
+            
             # Check if error is due to invalid column names, table names, or syntax errors
+            # 42S22 = Invalid column name, 42S02 = Invalid object name (table/view)
             is_column_error = "Invalid column" in error_str or "column" in error_str.lower() or "42S22" in error_str
-            is_table_error = "Invalid object name" in error_str or "table" in error_str.lower()
+            is_table_error = "Invalid object name" in error_str or "table" in error_str.lower() or "42S02" in error_str
             is_syntax_error = "syntax" in error_str.lower() or "incorrect syntax" in error_str.lower()
             
+            _validator_logger.info(f"🔍 Error Classification:")
+            _validator_logger.info(f"  - Column Error: {is_column_error}")
+            _validator_logger.info(f"  - Table Error: {is_table_error}")
+            _validator_logger.info(f"  - Syntax Error: {is_syntax_error}")
+            _logger.info(f"Error classification - Column: {is_column_error}, Table: {is_table_error}, Syntax: {is_syntax_error}")
+            
             # SQL Validator Agent: Use as fallback when SQLMaker's SQL fails during execution
-            if is_column_error or is_table_error or is_syntax_error:
+            # ALWAYS attempt correction for ANY SQL execution error (not just column/table/syntax)
+            # This ensures validator handles all SQLMaker errors
+            should_use_validator = is_column_error or is_table_error or is_syntax_error
+            
+            # Also check for other common SQL errors that should trigger validator
+            if not should_use_validator:
+                # Check for other SQL errors that might need correction
+                other_sql_errors = [
+                    "Invalid object", "object name", "does not exist", 
+                    "ambiguous", "cannot resolve", "unknown", "not found"
+                ]
+                for error_keyword in other_sql_errors:
+                    if error_keyword.lower() in error_str.lower():
+                        should_use_validator = True
+                        _validator_logger.info(f"✅ Detected other SQL error keyword '{error_keyword}', will use validator")
+                        _logger.info(f"Detected other SQL error keyword '{error_keyword}', will use validator")
+                        break
+            
+            _validator_logger.info(f"📝 Step 5: Should use validator? {should_use_validator}")
+            
+            if should_use_validator:
                 try:
+                    _validator_logger.info("=" * 80)
+                    _validator_logger.info("🔧 CALLING SQL VALIDATOR AGENT")
+                    _validator_logger.info("=" * 80)
                     _logger.info(f"SQLMaker query failed. Attempting correction using SQL Validator Agent: {error_str}")
                     
                     # Initialize validator (lazy - only when needed as fallback)
+                    _validator_logger.info("📝 Initializing SQL Validator Agent...")
                     validator = SQLValidatorAgent(db=db)
-                    schema_info = sql_agent.get_schema_info() if hasattr(sql_agent, "get_schema_info") else None
+                    
+                    # Get schema info directly from database instead of sql_agent (which may not be initialized)
+                    # The validator can get schema info itself, but we can provide it if available
+                    schema_info = None
+                    try:
+                        # Try to get schema info from sql_agent if it's already initialized
+                        if hasattr(sql_agent, "get_schema_info") and hasattr(sql_agent, "_schema_cache") and sql_agent._schema_cache:
+                            schema_info = sql_agent._schema_cache
+                            _validator_logger.info(f"✅ Using cached schema info from sql_agent (length: {len(schema_info)})")
+                        else:
+                            _validator_logger.info("⚠️ Schema info not available from sql_agent - validator will get it directly from database")
+                    except Exception as schema_error:
+                        _validator_logger.warning(f"⚠️ Could not get schema info from sql_agent: {schema_error}. Validator will get it directly.")
+                    
+                    _validator_logger.info(f"✅ Validator initialized. Schema info provided: {schema_info is not None}")
                     
                     # Try to correct the SQL
+                    _validator_logger.info(f"📝 Calling validator.validate_and_correct()...")
+                    _validator_logger.info(f"  - Original SQL: {cleaned_sql}")
+                    _validator_logger.info(f"  - Original Question: {request.question}")
+                    _validator_logger.info(f"  - Error Message: {error_str[:500]}")
+                    
                     correction_result = validator.validate_and_correct(
                         sql_query=cleaned_sql,
                         original_question=request.question,
                         schema_info=schema_info,
                         error_message=error_str
                     )
+                    
+                    _validator_logger.info(f"📝 Validator returned:")
+                    _validator_logger.info(f"  - Valid: {correction_result.get('valid')}")
+                    _validator_logger.info(f"  - Has corrected_sql: {bool(correction_result.get('corrected_sql'))}")
+                    _validator_logger.info(f"  - Error: {correction_result.get('error')}")
+                    _validator_logger.info(f"  - Attempts: {correction_result.get('attempts')}")
                 
                     if correction_result.get("corrected_sql"):
                         corrected_sql = correction_result["corrected_sql"]
-                        # Validate corrected SQL is safe
-                        if sql_agent.validate_sql(corrected_sql):
-                            try:
-                                # Retry with corrected SQL
-                                _logger.info(f"✅ Validator provided corrected SQL. Retrying execution...")
-                                db_result = db.execute(text(corrected_sql))
-                                rows = db_result.fetchall()
-                                columns = db_result.keys()
-                                data = [dict(zip(columns, row)) for row in rows]
-                                row_count = len(data)
-                                
-                                ql = request.question.lower()
-                                if row_count == 0:
-                                    answer_text = "No records found matching your query."
-                                elif "how many" in ql or "count" in ql:
-                                    answer_text = f"Found {row_count} record(s)."
-                                else:
-                                    answer_text = f"Found {row_count} record(s)."
-                                
-                                return ChatResponse(
-                                    answer=answer_text,
-                                    sql_query=corrected_sql,
-                                    data=data,
-                                    row_count=row_count,
-                                    is_predefined=False,
-                                    success=True,
-                                    agent_used=f"{used_agent}_validator_corrected",
-                                    route_reason=decision.get("reason"),
-                                )
-                            except Exception as retry_error:
-                                _logger.error(f"Validator-corrected SQL also failed: {retry_error}")
-                                # Fall through to return original error
+                        _validator_logger.info(f"✅ Validator provided corrected SQL:")
+                        _validator_logger.info(f"SQL: {corrected_sql}")
+                        
+                        # Check for semantic mismatch - if corrected SQL doesn't match user's intent
+                        _validator_logger.info("📝 Checking for semantic mismatch between question and corrected SQL...")
+                        if _check_semantic_mismatch(request.question, corrected_sql):
+                            _validator_logger.warning("⚠️ Semantic mismatch detected - corrected SQL doesn't match user's intent")
+                            _logger.warning("Semantic mismatch: Validator corrected SQL but it doesn't match user's question")
+                            # Don't use the corrected SQL - fall through to show BIU SPOC message
                         else:
-                            _logger.warning("Validator-corrected SQL contains unsafe operations")
+                            _validator_logger.info("✅ No semantic mismatch detected")
+                            # Validate corrected SQL is safe
+                            _validator_logger.info("📝 Validating corrected SQL for safety...")
+                            if sql_agent.validate_sql(corrected_sql):
+                                _validator_logger.info("✅ Corrected SQL passed safety validation")
+                                try:
+                                    # Retry with corrected SQL
+                                    _validator_logger.info("📝 Retrying execution with corrected SQL...")
+                                    _logger.info(f"✅ Validator provided corrected SQL. Retrying execution...")
+                                    db_result = db.execute(text(corrected_sql))
+                                    _validator_logger.info("✅ Corrected SQL execution successful!")
+                                    rows = db_result.fetchall()
+                                    columns = db_result.keys()
+                                    data = [dict(zip(columns, row)) for row in rows]
+                                    row_count = len(data)
+                                    
+                                    ql = request.question.lower()
+                                    if row_count == 0:
+                                        answer_text = "No records found matching your query."
+                                    elif "how many" in ql or "count" in ql:
+                                        answer_text = f"Found {row_count} record(s)."
+                                    else:
+                                        answer_text = f"Found {row_count} record(s)."
+                                    
+                                    return ChatResponse(
+                                        answer=answer_text,
+                                        sql_query=corrected_sql,
+                                        data=data,
+                                        row_count=row_count,
+                                        is_predefined=False,
+                                        success=True,
+                                        agent_used=f"{used_agent}_validator_corrected",
+                                        route_reason=decision.get("reason"),
+                                    )
+                                except Exception as retry_error:
+                                    _validator_logger.error(f"❌ Corrected SQL execution also failed: {retry_error}")
+                                    _logger.error(f"Validator-corrected SQL also failed: {retry_error}")
+                                    # Fall through to return original error
+                            else:
+                                _validator_logger.warning("⚠️ Validator-corrected SQL contains unsafe operations")
+                                _logger.warning("Validator-corrected SQL contains unsafe operations")
                     else:
+                        _validator_logger.warning("⚠️ Validator could not generate corrected SQL")
                         _logger.warning("Validator could not generate corrected SQL")
                 except Exception as validator_error:
+                    _validator_logger.error(f"❌ Exception in validator correction: {validator_error}", exc_info=True)
                     _logger.error(f"Error in validator correction: {validator_error}", exc_info=True)
+                    # Even if validator fails, log it but continue to return error
+            else:
+                _validator_logger.warning(f"⚠️ SQL error detected but validator NOT triggered")
+                _validator_logger.warning(f"Error: {error_str[:200]}")
+                _logger.warning(f"SQL error detected but validator not triggered. Error: {error_str[:200]}")
             
-            # If not a column error or correction failed, check if it's still column/field related
+            # If correction failed or validator wasn't triggered, return error
+            # Check if it's still column/field related for BIU SPOC message
             is_column_error = "column" in error_str.lower() or "field" in error_str.lower() or "42S22" in error_str
+            is_table_error_final = "Invalid object name" in error_str or "table" in error_str.lower() or "42S02" in error_str
+            
             answer_text = f"Error executing SQL query: {error_str}"
-            if is_column_error:
+            if is_column_error or is_table_error_final:
                 answer_text += _get_biu_spoc_message()
+            
             return ChatResponse(
                 answer=answer_text,
                 sql_query=cleaned_sql,
