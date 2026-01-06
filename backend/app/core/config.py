@@ -71,7 +71,7 @@ class Settings(BaseSettings):
     DATA_FRESHNESS_THRESHOLD_DAYS: int = 3  # Default: 3 days
     
     # Vector Knowledge Base Configuration
-    VECTOR_DB_PATH: str = "backend/data/vector_db"  # Path to ChromaDB storage
+    VECTOR_DB_PATH: str = "data/vector_db"  # Path to ChromaDB storage (relative to backend directory)
     KNOWLEDGE_BASE_COLLECTION: str = "ccm_knowledge_base"  # ChromaDB collection name
     EMBEDDING_MODEL: str = "text-embedding-ada-002"  # Azure OpenAI embedding model
     EMBEDDING_DEPLOYMENT: str = "text-embedding-ada-002"  # Azure OpenAI embedding deployment

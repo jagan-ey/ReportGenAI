@@ -7,6 +7,7 @@ Replaces the hardcoded knowledge_base.py with an intelligent, LLM-enhanced syste
 
 from typing import List, Dict, Optional, Any
 import logging
+import os
 
 _logger = logging.getLogger(__name__)
 
@@ -60,8 +61,26 @@ class VectorKnowledgeBase:
         Args:
             persist_directory: Directory to persist ChromaDB data (defaults to settings.VECTOR_DB_PATH)
         """
+        import os
         from app.core.config import settings
-        self.persist_directory = persist_directory or settings.VECTOR_DB_PATH
+        
+        # Resolve path to absolute path (relative to backend directory)
+        base_path = persist_directory or settings.VECTOR_DB_PATH
+        if not os.path.isabs(base_path):
+            # Get backend directory (where this file is located: backend/app/services/)
+            # Go up 3 levels: services -> app -> backend
+            backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            # Remove 'backend/' prefix from base_path if it exists to avoid backend/backend
+            # The config has "backend/data/vector_db", but we're already in backend directory
+            if base_path.startswith('backend/'):
+                base_path = base_path[8:]  # Remove 'backend/' prefix
+            self.persist_directory = os.path.normpath(os.path.join(backend_dir, base_path))
+            _logger.debug(f"Resolved vector DB path: {self.persist_directory}")
+        else:
+            self.persist_directory = os.path.normpath(base_path)
+        
+        # Ensure directory exists
+        os.makedirs(self.persist_directory, exist_ok=True)
         self.client = None
         self.collection = None
         self.embedding_model = None
@@ -308,8 +327,14 @@ class VectorKnowledgeBase:
         
         return "\n".join(context_parts)
     
-    def clear_all(self):
-        """Clear all knowledge from the database"""
+    def clear_all(self, delete_files: bool = False):
+        """
+        Clear all knowledge from the database
+        
+        Args:
+            delete_files: If True, deletes the entire ChromaDB database directory. 
+                         If False (default), only clears the collection data.
+        """
         self._ensure_initialized()
         
         # Check if collection is available
@@ -327,9 +352,84 @@ class VectorKnowledgeBase:
             all_data = self.collection.get()
             if all_data['ids'] and len(all_data['ids']) > 0:
                 self.collection.delete(ids=all_data['ids'])
-                _logger.info(f"Cleared {len(all_data['ids'])} knowledge chunks from vector database")
+                _logger.info(f"✅ Cleared {len(all_data['ids'])} knowledge chunks from vector database")
             else:
-                _logger.info("Knowledge base is already empty")
+                _logger.info("ℹ️  Knowledge base is already empty")
+            
+            # Optionally delete the entire database directory
+            if delete_files:
+                import shutil
+                import time
+                import gc
+                
+                # Properly close client and collection first to release file locks
+                # Order matters: close collection first, then client
+                collection_path = None
+                if self.collection:
+                    collection_path = self.persist_directory
+                    self.collection = None
+                
+                if self.client:
+                    try:
+                        # Try to reset the client to release all connections
+                        # ChromaDB PersistentClient doesn't have explicit close method
+                        # Setting to None and forcing garbage collection helps release file handles
+                        self.client = None
+                    except:
+                        pass
+                
+                # Reset initialization state BEFORE deleting files
+                self._initialized = False
+                self._init_attempted = False
+                self.embedding_model = None
+                
+                # Force garbage collection to release file handles (Windows needs this)
+                gc.collect()
+                time.sleep(1.5)  # Give Windows more time to release file locks
+                
+                # Delete the entire directory
+                if os.path.exists(self.persist_directory):
+                    try:
+                        # Try to delete files individually first (more reliable on Windows)
+                        for root, dirs, files in os.walk(self.persist_directory, topdown=False):
+                            for name in files:
+                                file_path = os.path.join(root, name)
+                                try:
+                                    os.chmod(file_path, 0o777)  # Make writable
+                                    os.remove(file_path)
+                                except PermissionError:
+                                    _logger.warning(f"Could not delete {file_path}, will retry with rmtree")
+                            for name in dirs:
+                                try:
+                                    os.rmdir(os.path.join(root, name))
+                                except:
+                                    pass
+                        
+                        # Final cleanup with rmtree
+                        if os.path.exists(self.persist_directory):
+                            shutil.rmtree(self.persist_directory, ignore_errors=True)
+                        
+                        _logger.info(f"✅ Deleted ChromaDB database directory: {self.persist_directory}")
+                    except (PermissionError, OSError) as e:
+                        _logger.error(f"❌ Cannot delete database files - they may be locked by another process.")
+                        _logger.error(f"   Directory: {self.persist_directory}")
+                        _logger.error(f"   Error: {e}")
+                        _logger.error(f"   Please:")
+                        _logger.error(f"   1. Close any running FastAPI/uvicorn servers")
+                        _logger.error(f"   2. Close any Python processes using the knowledge base")
+                        _logger.error(f"   3. Manually delete the directory if needed: {self.persist_directory}")
+                        raise RuntimeError(
+                            f"Cannot delete database files - they are locked. "
+                            f"Please close any other processes (FastAPI server, Python scripts) and try again. "
+                            f"Directory: {self.persist_directory}"
+                        ) from e
+                    
+                    # Reset initialization state so it can be recreated
+                    self._initialized = False
+                    self._init_attempted = False
+                    self.embedding_model = None
+                else:
+                    _logger.warning(f"Database directory does not exist: {self.persist_directory}")
         except Exception as e:
             _logger.error(f"Error clearing knowledge base: {e}")
             raise

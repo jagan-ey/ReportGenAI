@@ -81,8 +81,9 @@ class FollowUpAgentService:
         invalid_tables = []
         try:
             from app.services.schema_helper import get_all_tables
-            from app.core.database import get_engine
-            engine = get_engine()
+            from app.core.database import get_kb_engine
+            # Use KB engine for table validation (dimension tables are in KB DB)
+            engine = get_kb_engine()
             actual_tables = set(t.upper() for t in get_all_tables(engine))
             
             for table in tables:

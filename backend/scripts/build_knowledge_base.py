@@ -53,12 +53,27 @@ def main():
         choice = input("\nEnter choice (1-5): ").strip()
         
         if choice == "4":
-            confirm = input("Are you sure you want to clear all knowledge? (yes/no): ").strip().lower()
-            if confirm == "yes":
-                vector_kb.clear_all()
-                _logger.info("✅ Knowledge base cleared")
+            print("\nClear options:")
+            print("1. Clear collection data only (keeps database files)")
+            print("2. Clear collection data AND delete database files (complete cleanup)")
+            clear_choice = input("Enter choice (1-2): ").strip()
+            
+            if clear_choice == "2":
+                confirm = input("⚠️  WARNING: This will delete ALL database files. Are you sure? (yes/no): ").strip().lower()
+                if confirm == "yes":
+                    vector_kb.clear_all(delete_files=True)
+                    _logger.info("✅ Knowledge base cleared and database files deleted")
+                else:
+                    _logger.info("Cancelled")
+            elif clear_choice == "1":
+                confirm = input("Are you sure you want to clear all knowledge? (yes/no): ").strip().lower()
+                if confirm == "yes":
+                    vector_kb.clear_all(delete_files=False)
+                    _logger.info("✅ Knowledge base cleared (database files kept)")
+                else:
+                    _logger.info("Cancelled")
             else:
-                _logger.info("Cancelled")
+                _logger.info("Invalid choice")
             return
         
         if choice == "5":

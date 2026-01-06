@@ -309,6 +309,7 @@ function ChatInterface({ initialQuestion, onQuestionSent }) {
   const handleClearMessages = () => {
     if (window.confirm('Are you sure you want to clear all messages?')) {
       setMessages([])
+      setLastSqlQuery(null)  // Clear conversation context - prevents next question from using previous SQL context
     }
   }
 

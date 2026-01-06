@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from sqlalchemy.orm import Session
-from app.core.database import get_db
+from app.core.database import get_db, get_kb_db
 from app.core.config import settings
 
 # Setup dedicated logger for SQL validation debugging
@@ -227,13 +227,9 @@ def get_sql_agent():
     global _sql_agent
     if _sql_agent is None:
         # Build SQL Server connection string for LangChain
-        from urllib.parse import quote_plus
-        db_url = (
-            f"mssql+pyodbc://{settings.DB_USERNAME}:{quote_plus(settings.DB_PASSWORD)}"
-            f"@{settings.DB_SERVER}/{settings.DB_NAME}"
-            f"?driver={quote_plus(settings.DB_DRIVER)}"
-            f"&TrustServerCertificate=yes"
-        )
+        # Use KB database for SQL agent (dimension tables are in KB DB)
+        from app.core.database import get_kb_db_url
+        db_url = get_kb_db_url()
         _sql_agent = SQLAgentService(db_url)
     return _sql_agent
 
@@ -294,7 +290,11 @@ class ChatResponse(BaseModel):
 
 
 @router.post("/query", response_model=ChatResponse)
-async def chat_query(request: ChatRequest, db: Session = Depends(get_db)):
+async def chat_query(
+    request: ChatRequest, 
+    db: Session = Depends(get_db),  # Main DB for predefined queries lookup
+    kb_db: Session = Depends(get_kb_db)  # KB DB for SQL execution on dimension tables
+):
     """
     Process a natural language query and return results
     """
@@ -324,8 +324,9 @@ async def chat_query(request: ChatRequest, db: Session = Depends(get_db)):
                 request = request.copy(update={"question": request.question + followup_suffix, "skip_followups": True})
 
         # Orchestrator decides route: predefined vs report_sql vs conversational
-        from app.core.database import get_db_url
-        db_url = get_db_url()
+        # Use KB database URL for SQL generation (dimension tables are in KB DB)
+        from app.core.database import get_kb_db_url
+        db_url = get_kb_db_url()
         orchestrator = _get_orchestrator(db_url)
         decision = orchestrator.decide(
             db=db,
@@ -354,7 +355,8 @@ async def chat_query(request: ChatRequest, db: Session = Depends(get_db)):
 
             try:
                 from sqlalchemy import text
-                result = db.execute(text(predefined["sql"]))
+                # Predefined queries execute against KB database (dimension tables)
+                result = kb_db.execute(text(predefined["sql"]))
                 rows = result.fetchall()
                 columns = result.keys()
                 data = [dict(zip(columns, row)) for row in rows]
@@ -475,7 +477,8 @@ async def chat_query(request: ChatRequest, db: Session = Depends(get_db)):
         if not request.skip_followups:
             _validator_logger.info("📝 Step 3: Checking FollowUp Agent...")
             followup_agent = _get_followup_agent()
-            followup = followup_agent.analyze(db=db, question=request.question, sql_query=cleaned_sql)
+            # Use KB DB for followup analysis (dimension tables are in KB DB)
+            followup = followup_agent.analyze(db=kb_db, question=request.question, sql_query=cleaned_sql)
             if followup.get("needs_followup"):
                 _validator_logger.info("⚠️ FollowUp Agent requested clarification - returning early")
                 return ChatResponse(
@@ -497,7 +500,8 @@ async def chat_query(request: ChatRequest, db: Session = Depends(get_db)):
         _validator_logger.info("📝 Step 4: Executing SQL query...")
         try:
             from sqlalchemy import text
-            db_result = db.execute(text(cleaned_sql))
+            # Execute SQL against KB database (dimension tables are in KB DB)
+            db_result = kb_db.execute(text(cleaned_sql))
             _validator_logger.info("✅ SQL execution successful!")
             rows = db_result.fetchall()
             columns = db_result.keys()
@@ -515,7 +519,7 @@ async def chat_query(request: ChatRequest, db: Session = Depends(get_db)):
                         if sql_agent.validate_sql(simplified_sql):
                             try:
                                 _logger.info(f"Trying simplified SQL: {simplified_sql}")
-                                db_result = db.execute(text(simplified_sql))
+                                db_result = kb_db.execute(text(simplified_sql))
                                 rows = db_result.fetchall()
                                 columns = db_result.keys()
                                 data = [dict(zip(columns, row)) for row in rows]    
@@ -602,7 +606,8 @@ async def chat_query(request: ChatRequest, db: Session = Depends(get_db)):
                     
                     # Initialize validator (lazy - only when needed as fallback)
                     _validator_logger.info("📝 Initializing SQL Validator Agent...")
-                    validator = SQLValidatorAgent(db=db)
+                    # Use KB DB for validator (dimension tables are in KB DB)
+                    validator = SQLValidatorAgent(db=kb_db)
                     
                     # Get schema info directly from database instead of sql_agent (which may not be initialized)
                     # The validator can get schema info itself, but we can provide it if available
@@ -659,7 +664,7 @@ async def chat_query(request: ChatRequest, db: Session = Depends(get_db)):
                                     # Retry with corrected SQL
                                     _validator_logger.info("📝 Retrying execution with corrected SQL...")
                                     _logger.info(f"✅ Validator provided corrected SQL. Retrying execution...")
-                                    db_result = db.execute(text(corrected_sql))
+                                    db_result = kb_db.execute(text(corrected_sql))
                                     _validator_logger.info("✅ Corrected SQL execution successful!")
                                     rows = db_result.fetchall()
                                     columns = db_result.keys()
