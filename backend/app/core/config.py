@@ -42,10 +42,10 @@ class Settings(BaseSettings):
     DB_NAME: str = ""  # Set via DB_NAME environment variable
     
     # Knowledge Base Database (Regulatory Data Mart)
-    # This is the database where the dimension tables are located (e.g., axis_reg_mart)
+    # This is the database where the dimension tables are located (e.g., regulatory_data_mart)
     # If not specified, defaults to main DB settings (for backward compatibility)
     KB_DB_SERVER: str = ""  # Set via KB_DB_SERVER environment variable (defaults to DB_SERVER if not set)
-    KB_DB_NAME: str = ""  # Set via KB_DB_NAME environment variable (e.g., "axis_reg_mart" - the regulatory data mart database name)
+    KB_DB_NAME: str = ""  # Set via KB_DB_NAME environment variable (e.g., "regulatory_data_mart" - the regulatory data mart database name)
     KB_DB_USERNAME: str = ""  # Set via KB_DB_USERNAME (defaults to DB_USERNAME if not set)
     KB_DB_PASSWORD: str = ""  # Set via KB_DB_PASSWORD (defaults to DB_PASSWORD if not set)
     KB_DB_DRIVER: str = "ODBC Driver 17 for SQL Server"  # Same driver as main DB
