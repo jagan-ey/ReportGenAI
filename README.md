@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 # GenAI-Based Continuous Controls Monitoring (CCM) Platform
+=======
+         # GenAI-Based Continuous Controls Monitoring (CCM) Platform - POC
+>>>>>>> 1a8f6f02e09bcb7c778177a582167fce49731a15
 
 An intelligent GenAI-driven Continuous Controls Monitoring platform for banking, featuring natural language query capabilities with LLM agents, vector knowledge base (RAG), and multi-agent orchestration for accurate SQL generation.
 
@@ -274,4 +278,8 @@ This is a POC for internal evaluation. For questions or issues, please refer to 
 
 ## 📄 License
 
+<<<<<<< HEAD
 Proprietary - Internal Project
+=======
+Proprietary
+>>>>>>> 1a8f6f02e09bcb7c778177a582167fce49731a15
