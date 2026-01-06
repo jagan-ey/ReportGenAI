@@ -13,6 +13,7 @@ function ChatInterface({ initialQuestion, onQuestionSent }) {
   const [loading, setLoading] = useState(false)
   const [loadingStatus, setLoadingStatus] = useState('Processing your query...')
   const [lastSqlQuery, setLastSqlQuery] = useState(null)
+  const [mode, setMode] = useState('report') // 'conversation' | 'report'
   const [showApproverModal, setShowApproverModal] = useState(false)
   const [pendingApprovalMessage, setPendingApprovalMessage] = useState(null)
   const messagesEndRef = useRef(null)
@@ -65,7 +66,15 @@ function ChatInterface({ initialQuestion, onQuestionSent }) {
     )
 
     try {
-      const response = await sendQuery(query, true, queryKey, lastSqlQuery)
+      const response = await sendQuery(
+        query,
+        true,
+        queryKey,
+        mode === 'report' ? lastSqlQuery : null, // do not leak report SQL into conversation mode
+        null,
+        false,
+        mode
+      )
       
       // Add bot response with standardized structure
       // If backend requests follow-up, render follow-up UI instead of normal bot message
@@ -132,7 +141,8 @@ function ChatInterface({ initialQuestion, onQuestionSent }) {
         null,
         lastSqlQuery,
         answers,
-        true
+        true,
+        'report' // follow-ups always relate to report-style flows
       )
 
       const botMessage = {
@@ -315,8 +325,21 @@ function ChatInterface({ initialQuestion, onQuestionSent }) {
 
   return (
     <div className="chat-interface">
-      {messages.length > 0 && (
-        <div className="chat-header-actions">
+      <div className="chat-header-actions">
+        <div className="mode-toggle" role="group" aria-label="Select response mode">
+          <span className={`mode-label ${mode === 'conversation' ? 'active' : ''}`}>Conversation</span>
+          <label className="switch">
+            <input
+              type="checkbox"
+              checked={mode === 'report'}
+              onChange={(e) => setMode(e.target.checked ? 'report' : 'conversation')}
+              aria-label="Toggle between Conversation and Report mode"
+            />
+            <span className="slider round"></span>
+          </label>
+          <span className={`mode-label ${mode === 'report' ? 'active' : ''}`}>Report</span>
+        </div>
+        {messages.length > 0 && (
           <button 
             className="clear-messages-btn"
             onClick={handleClearMessages}
@@ -330,8 +353,8 @@ function ChatInterface({ initialQuestion, onQuestionSent }) {
               <line x1="14" y1="11" x2="14" y2="17"></line>
             </svg>
           </button>
-        </div>
-      )}
+        )}
+      </div>
       
       {messages.length === 0 && (
         <div className="welcome-message-top">

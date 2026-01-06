@@ -47,7 +47,8 @@ export const sendQuery = async (
   queryKey = null,
   previousSqlQuery = null,
   followupAnswers = null,
-  skipFollowups = false
+  skipFollowups = false,
+  mode = 'report'
 ) => {
   try {
     const response = await api.post('/chat/query', {
@@ -57,6 +58,7 @@ export const sendQuery = async (
       previous_sql_query: previousSqlQuery || null,
       followup_answers: followupAnswers || null,
       skip_followups: !!skipFollowups,
+      mode,
     })
     return response.data
   } catch (error) {

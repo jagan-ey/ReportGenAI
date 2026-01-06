@@ -1,285 +1,119 @@
-<<<<<<< HEAD
-# GenAI-Based Continuous Controls Monitoring (CCM) Platform
-=======
-         # GenAI-Based Continuous Controls Monitoring (CCM) Platform - POC
->>>>>>> 1a8f6f02e09bcb7c778177a582167fce49731a15
+# GenAI Continuous Controls Monitoring (CCM) Platform
 
-An intelligent GenAI-driven Continuous Controls Monitoring platform for banking, featuring natural language query capabilities with LLM agents, vector knowledge base (RAG), and multi-agent orchestration for accurate SQL generation.
+GenAI chat + SQL for banking controls monitoring. Multi-agent LLMs, vector knowledge base (RAG), and strict DB separation.
 
-## 🎯 Overview
+## What it does
+- Natural language to SQL with Azure OpenAI (GPT-4o).
+- Conversation mode (no SQL) vs Report mode (SQL generation + execution).
+- Multi-agent routing: Orchestrator, SQLMaker, SQL Validator (fallback), FollowUp, Conversational.
+- Vector knowledge base (ChromaDB) enriched with schema, sample data, and business docs.
+- Saved queries with guaranteed accuracy.
 
-This platform provides:
-- **Multi-Agent LLM System** - Orchestrator, SQLMaker, SQL Validator, FollowUp, and Conversational agents
-- **Vector Knowledge Base (RAG)** - ChromaDB-based knowledge base with enriched domain knowledge
-- **Saved Queries** - Predefined regulatory queries with 100% accuracy
-- **Natural Language to SQL** - Intelligent SQL generation using Azure OpenAI (GPT-4o)
-- **8 BIU Star Schema Tables** - Regulatory data mart with dimension tables
-- **Separate Database Architecture** - Application database (ccm_genai) and Knowledge Base database (axis_reg_mart)
-- **FastAPI Backend** - RESTful API with comprehensive agent orchestration
-- **React Frontend** - Modern chat interface with real-time agent feedback
+## Databases
+- **Application DB (`ccm_genai`)**: users, predefined_queries, approval_requests, scheduled_reports.
+- **Knowledge Base DB (`axis_reg_mart`)**: regulatory/star-schema tables (e.g., SUPER_CUSTOMER_DIM, SUPER_LOAN_ACCOUNT_DIM, GOLD_COLLATERAL_DIM, etc.). Used for SQL generation/execution and KB builds.
 
-## 🤖 LLM Agents
+## Architecture (high level)
+- React frontend chat with mode toggle (Conversation/Report), follow-ups, agent badges.
+- FastAPI backend orchestrating agents and SQL execution.
+- ChromaDB vector store for schema/business knowledge.
+- Two SQL Server DBs: app DB (`ccm_genai`) and KB/data mart (`axis_reg_mart`).
 
-The platform uses a multi-agent architecture:
-
-1. **Orchestrator Agent** - Routes queries to appropriate agents (saved queries, SQL generation, or conversational)
-2. **SQLMaker Agent** - Generates SQL queries from natural language using RAG knowledge base
-3. **SQL Validator Agent** - Validates and corrects SQL queries (fallback when SQLMaker fails)
-4. **FollowUp Agent** - Asks clarifying questions before query execution (date column selection, data freshness)
-5. **Conversational Agent** - Handles non-data questions about the platform, schema, and capabilities
-
-## 📊 Knowledge Base (RAG)
-
-- **Vector Database**: ChromaDB for semantic search
-- **Knowledge Sources**: Database schema, sample data, business documents (PDF, DOCX, TXT)
-- **Enrichment**: LLM-generated business context, synonyms, valid values, relationships
-- **Auto-updates**: Knowledge base can be rebuilt when regulatory data mart schema changes
-
-## 🏗️ Architecture
-
-```
-┌─────────────────────┐
-│  React Frontend     │
-│  - Chat Interface   │
-│  - Agent Badges     │
-│  - Follow-up Q&A    │
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│  FastAPI Backend    │
-│  - Orchestrator     │
-│  - Multi-Agent Sys  │
-└──────────┬──────────┘
-           │
-    ┌──────┴──────┐
-    │             │
-    ▼             ▼
-┌─────────┐  ┌──────────────────┐
-│ SQLMaker│  │ SQL Validator    │
-│ Agent   │  │ Agent (Fallback)  │
-└────┬────┘  └────────┬──────────┘
-     │                │
-     ▼                ▼
-┌─────────────────────────────┐
-│  Vector Knowledge Base (RAG)│
-│  - ChromaDB                 │
-│  - Domain Knowledge          │
-└──────────┬──────────────────┘
-           │
-    ┌──────┴──────┐
-    │             │
-    ▼             ▼
-┌──────────┐  ┌──────────────┐
-│ ccm_genai│  │axis_reg_mart │
-│ (App DB) │  │ (KB/Data DB) │
-│          │  │              │
-│ - users  │  │ - 8 Dimension│
-│ - saved  │  │   Tables     │
-│   queries│  │              │
-└──────────┘  └──────────────┘
-```
-
-## 🚀 Quick Start
-
-### Prerequisites
-- Python 3.10+
-- SQL Server (with two databases: `ccm_genai` and `axis_reg_mart`)
-- Azure OpenAI API Key and Endpoint
-- Node.js 18+ for frontend
-- ODBC Driver 17 for SQL Server
-
-### Backend Setup
-
+## Quick start (backend)
 ```bash
-# Navigate to backend
 cd backend
-
-# Create virtual environment
 python -m venv venv
-venv\Scripts\activate  # Windows
-# source venv/bin/activate  # Linux/Mac
-
-# Install dependencies
+venv\Scripts\activate        # Windows
+# source venv/bin/activate   # Linux/Mac
 pip install -r requirements.txt
 
-# Set up environment
-# Create a local .env file (this repo does not commit .env files)
-# On Windows (PowerShell):
-#   Copy-Item env.example .env
-# On Mac/Linux:
-#   cp env.example .env
-#
-# Edit `.env` and configure:
-#   - Azure OpenAI settings (API key, endpoint, deployment)
-#   - Main application database (DB_SERVER, DB_NAME=ccm_genai, DB_USERNAME, DB_PASSWORD)
-#   - Knowledge base database (KB_DB_SERVER, KB_DB_NAME=axis_reg_mart, KB_DB_USERNAME, KB_DB_PASSWORD)
-#   See env.example for all available settings.
+# configure .env (copy env.example)
+# - Azure OpenAI: AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_CHAT_DEPLOYMENT, AZURE_OPENAI_API_VERSION
+# - App DB: DB_SERVER, DB_NAME=ccm_genai, DB_USERNAME, DB_PASSWORD
+# - KB DB:  KB_DB_SERVER, KB_DB_NAME=axis_reg_mart, KB_DB_USERNAME, KB_DB_PASSWORD
 
-# Initialize application database tables
-python scripts/init_db.py
-
-# (Optional) Build vector knowledge base from regulatory data mart
-python scripts/build_knowledge_base.py
-
-# Run server
+python scripts/init_db.py             # create app tables
+python scripts/build_knowledge_base.py # build vector KB (choose schema/sample/doc options)
 uvicorn app.main:app --reload
 ```
 
-### Test the API
-
+## Quick start (frontend)
 ```bash
-# Health check
-curl http://localhost:8000/api/health
-
-# List predefined queries
-curl http://localhost:8000/api/chat/predefined
-
-# Test Question 1
-curl -X POST http://localhost:8000/api/chat/query \
-  -H "Content-Type: application/json" \
-  -d '{"question": "Customers whose ReKYC due >6 months, but ReKYC Credit freeze not applied under freeze code RKYCF?"}'
+cd frontend
+npm install
+npm run dev
 ```
 
-## 📊 Database Architecture
+## Using the chat
+- Conversation mode: answers via conversational agent (no SQL, no DB execution).
+- Report mode: routes to SQLMaker (uses KB schema from `axis_reg_mart`); executes SQL on KB DB; FollowUp may ask clarifications; Validator fixes failed SQL.
+- If report mode can’t form SQL, user is asked to switch to Conversation mode.
+- Saved queries run directly from `predefined_queries` (still executed on KB DB).
 
-### Application Database (`ccm_genai`)
-Stores application-specific data:
-- **users** - User accounts and authentication
-- **predefined_queries** - Saved queries (formerly predefined queries)
-- **approval_requests** - Report approval workflow
-- **scheduled_reports** - Scheduled report configurations
+## Knowledge base (RAG)
+- Built from the KB DB (`axis_reg_mart`) plus optional business docs.
+- `scripts/build_knowledge_base.py` options:
+  1) Full (schema + sample data + docs)
+  2) Schema only
+  3) Schema + sample data
+  4) Clear (data only or delete files)
+  5) Show stats
+- `knowledge_base_processor.py`:
+  - Introspects KB DB tables/columns/PKs/FKs.
+  - LLM-enriches with business descriptions, synonyms, column semantics, relationships, and example NL queries.
+  - Optionally samples data for value patterns; ingests PDF/DOCX/TXT business docs.
+  - Stores chunks in ChromaDB via `vector_knowledge_base.py`.
 
-### Knowledge Base Database (`axis_reg_mart`)
-Contains regulatory data mart with 8 dimension tables:
-1. **SUPER_CUSTOMER_DIM** - Customer master
-2. **CUSTOMER_NON_INDIVIDUAL_DIM** - Non-individual customers
-3. **ACCOUNT_CA_DIM** - Current accounts
-4. **SUPER_LOAN_DIM** - Loan master
-5. **SUPER_LOAN_ACCOUNT_DIM** - Loan details
-6. **CASELITE_LOAN_APPLICATIONS** - Gold loan applications
-7. **GOLD_COLLATERAL_DIM** - Gold collateral
-8. **CUSTOM_FREEZE_DETAILS_DIM** - Freeze details
+## Key agents
+- Orchestrator: decides predefined vs report SQL vs conversational.
+- SQLMaker: SQL generation with schema from KB and RAG context.
+- SQL Validator: fallback correction when SQL fails.
+- FollowUp: asks clarifications (date/freshness/filters/joins/etc.) before execution.
+- Conversational: platform/schema Q&A; used when mode=conversation or router deems non-SQL.
 
-**Note**: The knowledge base processor reads from `axis_reg_mart` to build the vector knowledge base (RAG).
+## Safety & validation
+- SELECT-only, dangerous keyword blocking, schema validation.
+- Separate connections for app DB vs KB DB; SQL execution happens on KB DB.
+- Semantic mismatch check to avoid wrong-column substitutions.
 
-## 🔑 Key Features
+## Maintenance tips
+- After schema changes in `axis_reg_mart`, rebuild the KB (`build_knowledge_base.py`).
+- Ensure KB DB has the needed tables (e.g., loan tables) or SQLMaker will map to nearest table.
+- Clear/clean vector DB via the build script option 4 (handles Windows locks).
 
-### 1. Multi-Agent LLM System
-- **Orchestrator Agent**: Intelligent routing based on query type
-- **SQLMaker Agent**: Generates SQL using RAG knowledge base
-- **SQL Validator Agent**: Fallback correction when SQLMaker fails
-- **FollowUp Agent**: Asks clarifying questions (date columns, data freshness)
-- **Conversational Agent**: Answers questions about platform and schema
-
-### 2. Vector Knowledge Base (RAG)
-- **ChromaDB**: Semantic search for domain knowledge
-- **Auto-enrichment**: LLM processes schema, data, and documents
-- **Business context**: Synonyms, valid values, relationships, example queries
-- **Maintenance**: Rebuild when regulatory data mart schema changes
-
-### 3. Saved Queries (100% Accuracy)
-- Predefined regulatory queries stored in database
-- Intelligent matching with date/number threshold validation
-- Direct SQL execution for guaranteed accuracy
-
-### 4. Intelligent SQL Generation
-- Schema-aware SQL generation using RAG
-- Self-repair mechanism (2-pass generation)
-- Post-execution query simplification
-- Generic and schema-driven (no hardcoded values)
-
-### 5. Query Safety & Validation
-- SQL injection prevention
-- SELECT-only queries
-- Dangerous keyword blocking
-- Schema validation before execution
-
-## 📁 Project Structure
-
-```
-ccm-genai/
-├── backend/
-│   ├── app/
-│   │   ├── api/              # API endpoints (chat, auth, reports, health)
-│   │   ├── core/             # Configuration, database, logging
-│   │   ├── database/         # Application schema (users, queries)
-│   │   ├── models/           # User models (User, ApprovalRequest, ScheduledReport)
-│   │   ├── services/         # LLM agents and business logic
-│   │   │   ├── orchestrator_agent.py
-│   │   │   ├── sql_maker_agent.py
-│   │   │   ├── sql_validator_agent.py
-│   │   │   ├── followup_agent.py
-│   │   │   ├── conversational_agent.py
-│   │   │   ├── knowledge_base_processor.py
-│   │   │   └── vector_knowledge_base.py
-│   │   └── main.py           # FastAPI app
-│   ├── scripts/
-│   │   ├── init_db.py        # Application database initialization
-│   │   ├── build_knowledge_base.py  # Vector KB builder
-│   │   └── seed_users.py     # User seeding
-│   ├── data/
-│   │   ├── vector_db/        # ChromaDB storage
-│   │   └── business_docs/    # Business documents for KB
-│   └── requirements.txt
-├── frontend/
-│   ├── src/
-│   │   ├── components/       # React components
-│   │   ├── services/         # API services
-│   │   └── contexts/         # Theme context
-│   └── package.json
-└── README.md
-```
-
-## 🔒 Security & Compliance
-
-- SQL injection prevention
-- Query validation (SELECT only)
-- Dangerous keyword blocking
-- Schema-driven validation (no hardcoded values)
-- Separate database connections for app and data mart
-- Environment-based configuration
-- Audit logging
-
-## 🚀 Environment Variables
-
-Key environment variables (see `backend/env.example` for full list):
-
+## Environment variables (essentials)
 ```env
 # Azure OpenAI
-AZURE_OPENAI_API_KEY=your_key
-AZURE_OPENAI_ENDPOINT=https://your-endpoint.openai.azure.com/
+AZURE_OPENAI_API_KEY=...
+AZURE_OPENAI_ENDPOINT=...
 AZURE_OPENAI_CHAT_DEPLOYMENT=gpt-4o
 AZURE_OPENAI_API_VERSION=2025-01-01-preview
 
-# Main Application Database
-DB_SERVER=your_server
+# App DB
+DB_SERVER=...
 DB_NAME=ccm_genai
-DB_USERNAME=your_username
-DB_PASSWORD=your_password
+DB_USERNAME=...
+DB_PASSWORD=...
 
-# Knowledge Base Database (Regulatory Data Mart)
-KB_DB_SERVER=your_server  # Optional: defaults to DB_SERVER
+# Knowledge Base DB
+KB_DB_SERVER=...        # optional; defaults to DB_SERVER
 KB_DB_NAME=axis_reg_mart
-KB_DB_USERNAME=your_username  # Optional: defaults to DB_USERNAME
-KB_DB_PASSWORD=your_password  # Optional: defaults to DB_PASSWORD
+KB_DB_USERNAME=...      # optional; defaults to DB_USERNAME
+KB_DB_PASSWORD=...      # optional; defaults to DB_PASSWORD
 ```
 
-## 📚 Additional Documentation
+## Project structure (summary)
+```
+backend/
+  app/api              # chat, auth, reports, health
+  app/services         # agents, KB processor, vector KB
+  app/core             # config, DB connections
+  scripts/             # init_db, build_knowledge_base, seeds
+  data/vector_db       # ChromaDB storage
+frontend/
+  src/components       # chat UI
+  src/services         # API client
+```
 
-- [Architecture Diagram](backend/ARCHITECTURE_DIAGRAM.md) - System and deployment architecture
-- [Agent Architecture](backend/AGENT_ARCHITECTURE.md) - LLM agents and flow
-- [Agent Comparison](backend/AGENT_COMPARISON.md) - SQLMaker vs SQL Validator
-- [Vector KB Setup](backend/VECTOR_KNOWLEDGE_BASE_SETUP.md) - Knowledge base setup guide
-
-## 🤝 Contributing
-
-This is a POC for internal evaluation. For questions or issues, please refer to the project documentation.
-
-## 📄 License
-
-<<<<<<< HEAD
-Proprietary - Internal Project
-=======
-Proprietary
->>>>>>> 1a8f6f02e09bcb7c778177a582167fce49731a15
+## Licensing
+Proprietary – internal project.
