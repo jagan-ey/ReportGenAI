@@ -4,6 +4,7 @@ Uses LLM to generate natural, contextual responses for conversational queries
 """
 from typing import Dict, Any, Optional
 from app.core.config import settings
+from app.services.prompt_loader import get_prompt_loader
 import logging
 import re
 import datetime as _dt
@@ -26,7 +27,9 @@ class ConversationalAgent:
         self._llm = None
         self._sql_agent = None
         self._engine = None
+        self._knowledge_base = None  # Vector knowledge base for rich context
         self._initialized = False
+        self._prompt_loader = get_prompt_loader()
     
     def _ensure_initialized(self):
         """Lazy initialization of LLM and schema access"""
@@ -47,17 +50,28 @@ class ConversationalAgent:
             _logger.info("✅ Conversational LLM initialized")
             
             # For schema-related questions, we need access to schema info
+            # Use lightweight SQLAlchemy engine for direct queries (don't require SQLAgentService)
             if self.db_url:
-                from app.services.sql_agent import SQLAgentService
-                self._sql_agent = SQLAgentService(self.db_url)
-                _logger.info("✅ Schema access initialized for conversational agent")
-
-                # Also keep a lightweight SQLAlchemy engine for metadata lookups (freshness, max dates, etc.)
                 try:
                     self._engine = create_engine(self.db_url, pool_pre_ping=True)
+                    _logger.info("✅ SQLAlchemy engine initialized for conversational agent")
                 except Exception as e:
                     _logger.warning(f"Could not create SQLAlchemy engine for conversational agent: {e}")
                     self._engine = None
+                
+                # SQLAgentService is optional - only initialize if needed (lazy)
+                # Don't initialize here to avoid SQLDatabase initialization errors
+                self._sql_agent = None
+                _logger.info("✅ Schema access will be available via direct queries (SQLAgentService lazy-loaded if needed)")
+            
+            # Initialize vector knowledge base for rich business context
+            try:
+                from app.services.vector_knowledge_base import get_vector_knowledge_base
+                self._knowledge_base = get_vector_knowledge_base()
+                _logger.info("✅ Knowledge base access initialized for conversational agent")
+            except Exception as e:
+                _logger.debug(f"Vector KB not available for conversational agent: {e}. Continuing without it.")
+                self._knowledge_base = None
             
             self._initialized = True
         except Exception as e:
@@ -124,60 +138,55 @@ class ConversationalAgent:
                 "is_conversational": True
             }
         
-        # Get schema information if needed for context
+        # Get schema information and knowledge base context if needed
         schema_context = ""
+        knowledge_context = ""
         question_lower = question.lower().strip()
         
+        # Check if this is a data/schema/column meaning question
+        is_data_question = any(keyword in question_lower for keyword in [
+            'table', 'column', 'schema', 'field', 'kyc', 'structure',
+            'what does', 'what is', 'what are', 'meaning', 'mean', 'represents',
+            'contains', 'data', 'values', 'valid', 'pattern'
+        ])
+        
         # For schema-related questions, include schema info
-        if any(keyword in question_lower for keyword in [
-            'table', 'column', 'schema', 'field', 'kyc', 'structure'
-        ]):
+        # Use direct database queries instead of SQLAgentService to avoid initialization errors
+        if is_data_question:
             try:
-                if self._sql_agent:
-                    schema_info = self._sql_agent.get_schema_info()
-                    # Include relevant parts of schema (first 2000 chars to avoid token limits)
-                    schema_context = f"\n\nDatabase Schema Information:\n{schema_info[:2000]}"
+                # Get schema info directly from database (lightweight, no SQLAgentService needed)
+                schema_context = self._get_schema_info_direct()
             except Exception as e:
                 _logger.warning(f"Could not get schema info: {str(e)}")
+                schema_context = ""
+            
+            # Get rich business context from knowledge base
+            if self._knowledge_base:
+                try:
+                    # Check if KB is initialized
+                    if (hasattr(self._knowledge_base, '_initialized') and 
+                        self._knowledge_base._initialized and
+                        hasattr(self._knowledge_base, 'collection') and
+                        self._knowledge_base.collection is not None):
+                        
+                        # Get relevant knowledge for answering the question
+                        knowledge_context = self._knowledge_base.get_relevant_knowledge(
+                            question=question,
+                            table_names=None,  # Don't filter by table - get all relevant knowledge
+                            knowledge_types=['table_schema', 'column_definition', 'data_patterns'],
+                            max_results=8,  # Get top 8 most relevant chunks
+                            min_relevance_score=None  # Return all results, sorted by relevance
+                        )
+                        _logger.debug(f"Retrieved knowledge context for conversational agent: {len(knowledge_context)} chars")
+                except Exception as e:
+                    _logger.debug(f"Could not retrieve knowledge from KB: {e}")
+                    knowledge_context = ""
         
-        # Build prompt for LLM
-        system_prompt = """You are a helpful assistant for the GenAI Continuous Controls Monitoring (CCM) Platform. 
-You help users understand the system, answer questions about the database schema, and guide them on how to use the platform.
-
-Key Information:
-- The platform has access to database tables as defined in the schema
-- Users can ask questions in natural language to query data
-- There are predefined queries available in the sidebar for 100% accuracy
-- The platform supports report download, approval workflows, and scheduling
-
-Your role:
-- Answer questions about the platform's capabilities
-- Explain how to use the system
-- Provide information about database tables and columns when asked
-- Be friendly, helpful, and concise
-- If asked about data, suggest using natural language queries or predefined queries
-
-IMPORTANT: Do NOT generate SQL queries. This is a conversational response only. If the user wants to query data, they should ask data questions which will be handled by the SQL agent."""
-
-        # Few-shot guidance for follow-ups about the last result
-        system_prompt += """
-
-Behavior for follow-up/meta questions:
-- If "Previous SQL" and "Source tables used in the previous SQL" are provided, use them to answer questions about:
-  - where the data came from (tables)
-  - what was executed (high-level explanation of the SQL intent)
-  - how the result was derived
-- Do NOT generate new SQL.
-
-Examples:
-User: "from which table we got this data?"
-Context: Source tables used in the previous SQL: - table_name
-Assistant: "The data came from the table table_name."
-
-User: "are the data from this table fresh or old?"
-Context: Freshness metadata (computed from database): - table_name: max(audit_column)=2025-11-30 10:05:00 (lag_days=16)
-Assistant: "The latest update in table_name is 2025-11-30 (16 days behind today). The data is older; confirm if you want to proceed."
-"""
+        # Build prompt for LLM from external file
+        system_prompt = self._prompt_loader.get_prompt("conversational_agent", "system_prompt")
+        
+        # Add follow-up guidance
+        system_prompt += self._prompt_loader.get_prompt("conversational_agent", "followup_guidance")
         
         prior_sql_context = ""
         source_tables_context = ""
@@ -207,9 +216,16 @@ Assistant: "The latest update in table_name is 2025-11-30 (16 days behind today)
                 source_tables_context = ""
                 freshness_context = ""
 
-        user_prompt = f"""User Question: {question}{schema_context}{prior_sql_context}{source_tables_context}{freshness_context}
-
-Please provide a helpful, natural response to this question. Be concise but informative."""
+        user_prompt = self._prompt_loader.get_prompt(
+            "conversational_agent",
+            "user_prompt_template",
+            question=question,
+            schema_context=schema_context,
+            knowledge_context=knowledge_context,  # Add knowledge base context
+            prior_sql_context=prior_sql_context,
+            source_tables_context=source_tables_context,
+            freshness_context=freshness_context
+        )
         
         try:
             # Use LLM to generate response
@@ -343,6 +359,49 @@ Please provide a helpful, natural response to this question. Be concise but info
 
         return freshness
 
+    def _get_schema_info_direct(self) -> str:
+        """
+        Get basic schema information directly from database without requiring SQLAgentService.
+        This is a lightweight alternative for simple schema questions.
+        """
+        if not self._engine:
+            return ""
+        
+        try:
+            # Get table count
+            table_count_query = text("""
+                SELECT COUNT(*) as table_count
+                FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_SCHEMA = 'dbo'
+                  AND TABLE_TYPE = 'BASE TABLE'
+            """)
+            
+            with self._engine.connect() as conn:
+                result = conn.execute(table_count_query)
+                table_count = result.scalar()
+                
+                # Get list of tables (limit to 20 for token efficiency)
+                tables_query = text("""
+                    SELECT TOP 20 TABLE_NAME
+                    FROM INFORMATION_SCHEMA.TABLES
+                    WHERE TABLE_SCHEMA = 'dbo'
+                      AND TABLE_TYPE = 'BASE TABLE'
+                    ORDER BY TABLE_NAME
+                """)
+                tables_result = conn.execute(tables_query)
+                table_names = [row[0] for row in tables_result]
+                
+                schema_info = f"Database contains {table_count} tables."
+                if table_names:
+                    schema_info += f"\nSample tables: {', '.join(table_names)}"
+                    if table_count > 20:
+                        schema_info += f" (and {table_count - 20} more)"
+                
+                return f"\n\nDatabase Schema Information:\n{schema_info}"
+        except Exception as e:
+            _logger.debug(f"Could not get schema info directly: {e}")
+            return ""
+    
     def _extract_tables_from_sql(self, sql: str) -> list:
         """
         Best-effort extraction of table names from SQL Server query.

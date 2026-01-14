@@ -1,12 +1,19 @@
 """
 Authentication API endpoints
+Supports both username/password and SSO authentication based on SSO_ENABLED flag
 """
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 from sqlalchemy.orm import Session
 from app.core.database import get_db
+from app.core.config import settings
 from app.services.auth import authenticate_user, hash_password, get_user_by_username
+from app.services.sso_auth import (
+    get_user_from_oauth2_token,
+    get_user_from_proxy_headers,
+    exchange_oauth2_code_for_token
+)
 from app.models.user import User
 from datetime import datetime
 
@@ -46,7 +53,14 @@ class UpdateUserRequest(BaseModel):
 async def login(request: LoginRequest, db: Session = Depends(get_db)):
     """
     Authenticate user with username/email and password
+    Only available when SSO_ENABLED=False
     """
+    if settings.SSO_ENABLED:
+        raise HTTPException(
+            status_code=400,
+            detail="Username/password authentication is disabled. Please use SSO login."
+        )
+    
     try:
         user = authenticate_user(db, request.username, request.password)
         
@@ -67,7 +81,7 @@ async def login(request: LoginRequest, db: Session = Depends(get_db)):
                 "role": user.ROLE,
                 "department": user.DEPARTMENT
             },
-            "token": None  # For future JWT implementation
+            "token": None
         }
     except HTTPException:
         raise
@@ -294,4 +308,145 @@ async def delete_user(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error deleting user: {str(e)}")
+
+
+# ============================================
+# SSO Authentication Endpoints
+# ============================================
+
+class SSOCallbackRequest(BaseModel):
+    code: str
+    state: Optional[str] = None
+
+
+@router.post("/sso/callback")
+async def sso_callback(
+    request: SSOCallbackRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Handle OAuth2/OIDC callback after SSO login
+    Exchanges authorization code for tokens and returns user info
+    """
+    if not settings.SSO_ENABLED:
+        raise HTTPException(
+            status_code=400,
+            detail="SSO is not enabled"
+        )
+    
+    if settings.SSO_TYPE != "oauth2_oidc":
+        raise HTTPException(
+            status_code=400,
+            detail="OAuth2/OIDC callback only available for oauth2_oidc SSO type"
+        )
+    
+    try:
+        # Exchange code for tokens
+        token_data = await exchange_oauth2_code_for_token(request.code)
+        if not token_data:
+            raise HTTPException(
+                status_code=401,
+                detail="Failed to exchange authorization code for tokens"
+            )
+        
+        # Get user from access token
+        user_info = await get_user_from_oauth2_token(db, token_data["access_token"])
+        if not user_info:
+            raise HTTPException(
+                status_code=401,
+                detail="Failed to extract user information from token"
+            )
+        
+        return {
+            "status": "success",
+            "message": "SSO login successful",
+            "user": user_info,
+            "token": token_data["access_token"],  # Return token for frontend
+            "id_token": token_data.get("id_token"),
+            "refresh_token": token_data.get("refresh_token")
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error during SSO callback: {str(e)}")
+
+
+@router.get("/sso/login-url")
+async def get_sso_login_url():
+    """
+    Get SSO login URL for OAuth2/OIDC flow
+    """
+    if not settings.SSO_ENABLED:
+        raise HTTPException(
+            status_code=400,
+            detail="SSO is not enabled"
+        )
+    
+    if settings.SSO_TYPE != "oauth2_oidc":
+        raise HTTPException(
+            status_code=400,
+            detail="Login URL only available for OAuth2/OIDC"
+        )
+    
+    if not settings.SSO_AUTHORITY or not settings.SSO_CLIENT_ID:
+        raise HTTPException(
+            status_code=500,
+            detail="SSO configuration incomplete"
+        )
+    
+    # Build authorization URL
+    auth_url = (
+        f"{settings.SSO_AUTHORITY}/oauth2/v2.0/authorize?"
+        f"client_id={settings.SSO_CLIENT_ID}&"
+        f"response_type=code&"
+        f"redirect_uri={settings.SSO_REDIRECT_URI}&"
+        f"response_mode=query&"
+        f"scope={settings.SSO_SCOPE}"
+    )
+    
+    return {
+        "login_url": auth_url,
+        "sso_enabled": True,
+        "sso_type": settings.SSO_TYPE
+    }
+
+
+@router.post("/sso/validate")
+async def validate_sso_token(
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    db: Session = Depends(get_db)
+):
+    """
+    Validate SSO token and return user information
+    Used by frontend to check if session is still valid
+    """
+    if not settings.SSO_ENABLED:
+        raise HTTPException(
+            status_code=400,
+            detail="SSO is not enabled"
+        )
+    
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid authorization header"
+        )
+    
+    token = authorization.split(" ")[1]
+    
+    try:
+        if settings.SSO_TYPE == "oauth2_oidc":
+            user_info = await get_user_from_oauth2_token(db, token)
+            if not user_info:
+                raise HTTPException(status_code=401, detail="Invalid token")
+            return user_info
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Token validation not supported for SSO type: {settings.SSO_TYPE}"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error validating token: {str(e)}")
 

@@ -1,6 +1,7 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { useUser } from '../contexts/UserContext'
 import { login as apiLogin, register } from '../services/api'
+import { isSSOEnabled, initiateSSOLogin, handleSSOCallback, validateSSOToken } from '../services/sso'
 import './Login.css'
 
 function Login() {
@@ -10,6 +11,49 @@ function Login() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [showRegister, setShowRegister] = useState(false)
+  const [ssoEnabled, setSsoEnabled] = useState(false)
+  
+  // Check if SSO is enabled on mount
+  useEffect(() => {
+    setSsoEnabled(isSSOEnabled())
+    
+    // Handle SSO callback if code is in URL
+    const urlParams = new URLSearchParams(window.location.search)
+    const code = urlParams.get('code')
+    
+    if (code && isSSOEnabled()) {
+      handleSSOCallbackFlow(code)
+    }
+  }, [])
+  
+  const handleSSOCallbackFlow = async (code) => {
+    setLoading(true)
+    setError('')
+    
+    try {
+      const user = await handleSSOCallback(code)
+      login(user)
+      // Remove code from URL
+      window.history.replaceState({}, document.title, window.location.pathname)
+    } catch (error) {
+      setError(error.message || 'SSO login failed. Please try again.')
+    } finally {
+      setLoading(false)
+    }
+  }
+  
+  const handleSSOLogin = async () => {
+    setLoading(true)
+    setError('')
+    
+    try {
+      await initiateSSOLogin()
+      // User will be redirected to SSO provider
+    } catch (error) {
+      setError(error.message || 'Failed to initiate SSO login.')
+      setLoading(false)
+    }
+  }
   
   // Registration form state
   const [regData, setRegData] = useState({
@@ -98,61 +142,88 @@ function Login() {
         {!showRegister ? (
           <div className="login-content">
             <h2>Sign In</h2>
-            <p className="login-subtitle">
-              Enter your username/email and password to continue
-            </p>
-
-            {error && (
-              <div className="error-message">
-                {error}
-              </div>
-            )}
-
-            <form onSubmit={handleLogin} className="login-form">
-              <div className="form-group">
-                <label htmlFor="username">Username or Email:</label>
-                <input
-                  id="username"
-                  type="text"
-                  className="form-input"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  placeholder="Enter username or email"
-                  required
-                  autoFocus
-                />
-              </div>
-
-              <div className="form-group">
-                <label htmlFor="password">Password:</label>
-                <input
-                  id="password"
-                  type="password"
-                  className="form-input"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Enter password"
-                  required
-                />
-              </div>
-
-              <button type="submit" className="login-button" disabled={loading}>
-                {loading ? 'Signing in...' : 'Sign In'}
-              </button>
-            </form>
-
-            <div className="login-footer">
-              <p>
-                Don't have an account?{' '}
+            
+            {ssoEnabled ? (
+              <>
+                <p className="login-subtitle">
+                  Sign in with your organization's Single Sign-On (SSO)
+                </p>
+                
+                {error && (
+                  <div className="error-message">
+                    {error}
+                  </div>
+                )}
+                
                 <button
                   type="button"
-                  className="link-button"
-                  onClick={() => setShowRegister(true)}
+                  className="login-button"
+                  onClick={handleSSOLogin}
+                  disabled={loading}
+                  style={{ width: '100%', marginTop: '1rem' }}
                 >
-                  Register here
+                  {loading ? 'Redirecting to SSO...' : 'Sign in with SSO'}
                 </button>
-              </p>
-            </div>
+              </>
+            ) : (
+              <>
+                <p className="login-subtitle">
+                  Enter your username/email and password to continue
+                </p>
+
+                {error && (
+                  <div className="error-message">
+                    {error}
+                  </div>
+                )}
+
+                <form onSubmit={handleLogin} className="login-form">
+                  <div className="form-group">
+                    <label htmlFor="username">Username or Email:</label>
+                    <input
+                      id="username"
+                      type="text"
+                      className="form-input"
+                      value={username}
+                      onChange={(e) => setUsername(e.target.value)}
+                      placeholder="Enter username or email"
+                      required
+                      autoFocus
+                    />
+                  </div>
+
+                  <div className="form-group">
+                    <label htmlFor="password">Password:</label>
+                    <input
+                      id="password"
+                      type="password"
+                      className="form-input"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="Enter password"
+                      required
+                    />
+                  </div>
+
+                  <button type="submit" className="login-button" disabled={loading}>
+                    {loading ? 'Signing in...' : 'Sign In'}
+                  </button>
+                </form>
+
+                <div className="login-footer">
+                  <p>
+                    Don't have an account?{' '}
+                    <button
+                      type="button"
+                      className="link-button"
+                      onClick={() => setShowRegister(true)}
+                    >
+                      Register here
+                    </button>
+                  </p>
+                </div>
+              </>
+            )}
           </div>
         ) : (
           <div className="login-content">

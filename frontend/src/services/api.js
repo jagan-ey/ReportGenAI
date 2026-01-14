@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { getSSOToken, isSSOEnabled, clearSSOSession } from './sso'
 
 // Use environment variable for API base URL, fallback to localhost for development
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api'
@@ -10,14 +11,97 @@ const api = axios.create({
   },
 })
 
-// Add request interceptor to include user ID in headers
+// Global reference to inactivity timer reset function
+// This will be set by UserContext when it initializes
+let globalResetInactivityTimer = null
+
+// Track active API requests to prevent timeout during long-running queries
+if (typeof window !== 'undefined') {
+  window.activeFetchCount = window.activeFetchCount || 0
+}
+
+export const setInactivityTimerReset = (resetFn) => {
+  globalResetInactivityTimer = resetFn
+}
+
+// Add request interceptor to include authentication headers and reset inactivity timer
 api.interceptors.request.use((config) => {
-  const user = JSON.parse(localStorage.getItem('ccm_user') || 'null')
-  if (user && user.username) {
-    config.headers['X-User-ID'] = user.username
+  // Track active API requests
+  if (typeof window !== 'undefined') {
+    window.activeFetchCount = (window.activeFetchCount || 0) + 1
   }
+  
+  // Check if SSO is enabled and use SSO token
+  if (isSSOEnabled()) {
+    const ssoToken = getSSOToken()
+    if (ssoToken) {
+      config.headers['Authorization'] = `Bearer ${ssoToken}`
+    }
+  } else {
+    // Legacy: Use X-User-ID header
+    const userStr = localStorage.getItem('ccm_user')
+    if (userStr) {
+      try {
+        const user = JSON.parse(userStr)
+        if (user && user.username) {
+          config.headers['X-User-ID'] = user.username
+        }
+      } catch (e) {
+        localStorage.removeItem('ccm_user')
+      }
+    }
+  }
+  
+  // API calls indicate user activity - reset inactivity timer
+  if (globalResetInactivityTimer) {
+    globalResetInactivityTimer()
+  }
+  
   return config
 })
+
+// Add response interceptor to handle 401 (unauthorized) errors and reset inactivity timer
+api.interceptors.response.use(
+  (response) => {
+    // Decrement active request counter
+    if (typeof window !== 'undefined' && window.activeFetchCount > 0) {
+      window.activeFetchCount--
+    }
+    
+    // Reset inactivity timer on successful API responses
+    // This ensures that long-running queries don't timeout the user
+    if (globalResetInactivityTimer) {
+      globalResetInactivityTimer()
+    }
+    return response
+  },
+  async (error) => {
+    // Decrement active request counter
+    if (typeof window !== 'undefined' && window.activeFetchCount > 0) {
+      window.activeFetchCount--
+    }
+    
+    // Reset inactivity timer even on errors (except 401)
+    // This prevents timeout during error handling
+    if (error.response && error.response.status !== 401) {
+      if (globalResetInactivityTimer) {
+        globalResetInactivityTimer()
+      }
+    }
+    
+    // If backend returns 401, session is invalid - clear it
+    if (error.response && error.response.status === 401) {
+      if (isSSOEnabled()) {
+        clearSSOSession()
+        // Redirect to SSO login will be handled by Login component
+      } else {
+        localStorage.removeItem('ccm_user')
+      }
+      // The App.jsx will handle redirecting to login when isAuthenticated becomes false
+    }
+    return Promise.reject(error)
+  }
+)
 
 // Auth API functions
 export const login = async (username, password) => {

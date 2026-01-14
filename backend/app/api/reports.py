@@ -21,38 +21,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-# User context - queries database for user information
-def get_current_user(
-    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
-    db: Session = Depends(get_db)
-):
-    """
-    Get current user from header and query database
-    In production, this would validate JWT token or session
-    """
-    if x_user_id:
-        from app.services.auth import get_user_by_username
-        user = get_user_by_username(db, x_user_id)
-        
-        if user and user.IS_ACTIVE:
-            return {
-                "user_id": user.USER_ID,
-                "username": user.USERNAME,
-                "email": user.EMAIL,
-                "role": user.ROLE,
-                "full_name": user.FULL_NAME,
-                "department": user.DEPARTMENT
-            }
-    
-    # Default user if not found or not provided
-    return {
-        "user_id": 0,
-        "username": "system",
-        "email": "system@bank.com",
-        "role": "user",
-        "full_name": "System User",
-        "department": None
-    }
+# Import centralized auth middleware
+from app.core.auth_middleware import get_current_user
 
 
 class ApprovalRequest(BaseModel):

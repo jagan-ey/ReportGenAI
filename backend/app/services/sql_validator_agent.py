@@ -16,6 +16,7 @@ from sqlalchemy import text, inspect
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.services.prompt_loader import get_prompt_loader
 
 # Setup dedicated logger for SQL validator debugging
 _log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'logs')
@@ -50,8 +51,10 @@ class SQLValidatorAgent:
     def __init__(self, db: Session):
         self.db = db
         self._llm = None
+        self._knowledge_base = None  # Vector knowledge base for business context
         self._initialized = False
         self._column_cache = {}  # Cache column names per table
+        self._prompt_loader = get_prompt_loader()
     
     def _ensure_initialized(self):
         if self._initialized:
@@ -90,6 +93,15 @@ class SQLValidatorAgent:
             )
             self._initialized = True
             _validator_logger.info("✅ LLM initialized successfully")
+            
+            # Initialize vector knowledge base for business context
+            try:
+                from app.services.vector_knowledge_base import get_vector_knowledge_base
+                self._knowledge_base = get_vector_knowledge_base()
+                _validator_logger.info("✅ Knowledge base access initialized for validator")
+            except Exception as e:
+                _validator_logger.debug(f"Vector KB not available for validator: {e}. Continuing without it.")
+                self._knowledge_base = None
         except Exception as e:
             _validator_logger.error(f"❌ SQLValidator LLM initialization failed: {e}", exc_info=True)
             _logger.warning(f"SQLValidator LLM not available: {e}")
@@ -726,6 +738,32 @@ class SQLValidatorAgent:
         actual_columns = self._get_actual_columns_for_tables(sql_query)
         _validator_logger.info(f"✅ Retrieved column info (length: {len(actual_columns) if actual_columns else 0})")
         
+        # Get business context from knowledge base to understand which tables/columns are correct
+        knowledge_context = ""
+        if self._knowledge_base:
+            try:
+                # Check if KB is initialized
+                if (hasattr(self._knowledge_base, '_initialized') and 
+                    self._knowledge_base._initialized and
+                    hasattr(self._knowledge_base, 'collection') and
+                    self._knowledge_base.collection is not None):
+                    
+                    # Extract table names from SQL to filter knowledge
+                    tables_in_sql = self._extract_tables(sql_query)
+                    
+                    # Get relevant knowledge for the original question
+                    knowledge_context = self._knowledge_base.get_relevant_knowledge(
+                        question=original_question,  # Use original question to understand intent
+                        table_names=tables_in_sql if tables_in_sql else None,
+                        knowledge_types=['table_schema', 'column_definition', 'data_patterns'],
+                        max_results=8,  # Get top 8 most relevant chunks
+                        min_relevance_score=None
+                    )
+                    _validator_logger.info(f"✅ Retrieved knowledge context for validator (length: {len(knowledge_context)})")
+            except Exception as e:
+                _validator_logger.debug(f"Could not retrieve knowledge from KB: {e}")
+                knowledge_context = ""
+        
         # Also get list of all available tables for better context
         all_tables = []
         try:
@@ -779,82 +817,50 @@ class SQLValidatorAgent:
         except Exception as e:
             _validator_logger.warning(f"⚠️ Could not get all tables list: {e}")
         
-        system_prompt = (
-            "You are a SQL correction specialist. Your job is to fix SQL queries that have invalid table or column names.\n"
-            "CRITICAL RULES - YOU MUST FOLLOW THESE EXACTLY:\n"
-            "1. Use ONLY the exact column names provided in the 'ACTUAL TABLE AND COLUMN NAMES IN DATABASE' section\n"
-            "2. Do NOT invent, guess, or create column names (e.g., do NOT use 'loan_id', 'customer_id', 'loan_end_date', 'loan_status')\n"
-            "3. Do NOT convert column names to snake_case or camelCase - use the EXACT names as shown (they may be UPPERCASE, lowercase, or mixed)\n"
-            "4. If a table doesn't exist, find the most similar table from the actual schema (e.g., 'Loans' -> 'super_loan_account_dim' or 'caselite_loan_applications')\n"
-            "5. When replacing a table, you MUST also replace ALL column names with the actual column names from the new table\n"
-            "6. Match columns based on:\n"
-            "   - Exact name match if possible\n"
-            "   - Semantic meaning (e.g., 'LoanEndDate' -> find date columns in the new table)\n"
-            "   - Data type (e.g., dates, amounts, IDs)\n"
-            "7. Return ONLY the corrected SQL query (no markdown, no explanations, no code blocks)\n"
-            "8. Preserve the original query logic and structure\n"
-            "9. Use TOP (not LIMIT) for SQL Server\n"
-            "10. If you cannot find a matching column, remove that column from SELECT or WHERE clause rather than inventing a name\n"
-        )
+        system_prompt = self._prompt_loader.get_prompt("sql_validator", "system_prompt")
         
-        user_prompt_parts = [
-            f"Original question: {original_question}\n\n",
-            f"SQL query with error:\n{sql_query}\n\n",
-            f"Error message:\n{error_message}\n\n"
-        ]
-        
+        # Build user prompt using template
+        actual_columns_section = ""
         if actual_columns:
             _validator_logger.info(f"📝 Adding actual columns info to prompt (length: {len(actual_columns)})")
-            user_prompt_parts.append(f"ACTUAL TABLE AND COLUMN NAMES IN DATABASE:\n{actual_columns}\n\n")
-            user_prompt_parts.append(
-                "CRITICAL: You MUST use ONLY the exact column names listed above. "
-                "Do NOT invent column names or use generic names like 'loan_id', 'customer_id', 'loan_end_date', etc. "
-                "Use the EXACT column names as they appear in the database schema above (case-sensitive).\n\n"
+            actual_columns_section = self._prompt_loader.get_prompt(
+                "sql_validator",
+                "actual_columns_section_template",
+                actual_columns=actual_columns
             )
         
+        schema_info_section = ""
         if schema_info:
-            user_prompt_parts.append(f"Schema information:\n{schema_info[:2000]}\n\n")
+            schema_info_section = self._prompt_loader.get_prompt(
+                "sql_validator",
+                "schema_info_section_template",
+                schema_info=schema_info[:2000]
+            )
         
         # Check if error is about table or column
         is_table_error = "Invalid object name" in error_message or "42S02" in error_message
         is_column_error = "Invalid column name" in error_message or "42S22" in error_message
         
+        table_error_section = ""
         if is_table_error:
-            user_prompt_parts.append(
-                "CRITICAL: The error is about an INVALID TABLE NAME.\n"
-                "You MUST:\n"
-                "- Replace the invalid table name with the correct table name from the schema\n"
-                "- Use the 'ACTUAL TABLE AND COLUMN NAMES IN DATABASE' section above to find the correct table names.\n"
-                "- Match tables based on:\n"
-                "  * Name similarity (find tables with similar names from the actual schema)\n"
-                "  * Context from the original question (e.g., 'loans' -> loan-related tables)\n"
-                "  * Column names used in the query (match columns to the correct table)\n"
-                "- Update ALL references to the invalid table (FROM, JOIN, aliases, column prefixes)\n"
-                "- CRITICAL: When replacing columns, use ONLY the exact column names from the 'ACTUAL TABLE AND COLUMN NAMES IN DATABASE' section above\n"
-                "- Do NOT invent column names - if the original query has an invalid column name, find the closest matching column from the actual schema provided above\n"
-                "- Do NOT use generic names like 'loan_id', 'customer_id', 'loan_end_date' - use the EXACT names from the schema\n"
-                "- Preserve the original query intent while using correct table and column names\n\n"
-            )
+            table_error_section = self._prompt_loader.get_prompt("sql_validator", "table_error_section_template")
         
+        column_error_section = ""
         if is_column_error:
-            user_prompt_parts.append(
-                "CRITICAL: The error is about an INVALID COLUMN NAME.\n"
-                "You MUST:\n"
-                "- Replace the invalid column name with the correct column name from the schema\n"
-                "- Use ONLY the actual column names from the schema provided above\n"
-                "- Match columns based on:\n"
-                "  * Name similarity (e.g., 'invalid_col' might be 'valid_col' or 'similar_col')\n"
-                "  * Context (e.g., if looking for status, find status-related columns)\n"
-                "  * Data type (e.g., if filtering by date, use date columns)\n"
-                "- Preserve the original query intent while using correct column names\n"
-                "- If a column doesn't exist and no similar column is found, remove that condition or use a different approach\n\n"
-            )
+            column_error_section = self._prompt_loader.get_prompt("sql_validator", "column_error_section_template")
         
-        user_prompt_parts.append(
-            "Return ONLY the corrected SQL query (no markdown, no explanations):"
+        user_prompt = self._prompt_loader.get_prompt(
+            "sql_validator",
+            "user_prompt_template",
+            original_question=original_question,
+            sql_query=sql_query,
+            error_message=error_message,
+            knowledge_context=knowledge_context,  # Add knowledge base context
+            actual_columns_section=actual_columns_section,
+            schema_info_section=schema_info_section,
+            table_error_section=table_error_section,
+            column_error_section=column_error_section
         )
-        
-        user_prompt = "".join(user_prompt_parts)
         
         try:
             from langchain_core.messages import SystemMessage, HumanMessage

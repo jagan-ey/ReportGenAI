@@ -268,7 +268,9 @@ class VectorKnowledgeBase:
         self,
         question: str,
         table_names: Optional[List[str]] = None,
-        knowledge_types: Optional[List[str]] = None
+        knowledge_types: Optional[List[str]] = None,
+        max_results: int = 10,
+        min_relevance_score: Optional[float] = None
     ) -> str:
         """
         Get relevant knowledge for a question, formatted for LLM context
@@ -278,6 +280,9 @@ class VectorKnowledgeBase:
             table_names: Optional list of table names to filter by
             knowledge_types: Optional list of knowledge types to filter by
                 (e.g., ["column_definition", "business_rule", "example_query"])
+            max_results: Maximum number of results to return (default: 10)
+            min_relevance_score: Optional minimum relevance score (distance threshold)
+                Lower distance = higher relevance. Typical threshold: 0.5-0.7
         
         Returns:
             Formatted knowledge context string
@@ -292,12 +297,29 @@ class VectorKnowledgeBase:
                 if table_names:
                     filter_metadata['table'] = {"$in": table_names}
             
-            # Search for relevant knowledge
+            # Enhanced query: expand with synonyms and related terms
+            expanded_query = self._expand_query(question)
+            
+            # Search for relevant knowledge with expanded query
             results = self.search(
-                query=question,
-                n_results=10,
+                query=expanded_query,
+                n_results=max_results * 2,  # Get more results, then filter by relevance
                 filter_metadata=filter_metadata if filter_metadata else None
             )
+            
+            # Filter by relevance score if threshold provided
+            if min_relevance_score is not None and results:
+                filtered_results = []
+                for result in results:
+                    distance = result.get('distance', 1.0)
+                    # ChromaDB uses cosine distance: 0 = identical, 1 = completely different
+                    # Lower distance = higher relevance
+                    if distance <= min_relevance_score:
+                        filtered_results.append(result)
+                results = filtered_results[:max_results]
+            else:
+                results = results[:max_results]
+                
         except Exception as e:
             _logger.warning(f"Error retrieving knowledge from vector DB: {e}")
             return "No relevant knowledge available from knowledge base."
@@ -305,27 +327,98 @@ class VectorKnowledgeBase:
         if not results:
             return "No relevant knowledge found in knowledge base."
         
-        # Format results for LLM context
+        # Format results for LLM context with better structure
         context_parts = ["=== RELEVANT KNOWLEDGE FROM KNOWLEDGE BASE ==="]
         
-        # Group by type
-        by_type = {}
+        # Group by type and table for better organization
+        by_type_table = {}
         for result in results:
             kb_type = result['metadata'].get('type', 'unknown')
-            if kb_type not in by_type:
-                by_type[kb_type] = []
-            by_type[kb_type].append(result)
+            table = result['metadata'].get('table', 'unknown')
+            key = f"{kb_type}::{table}"
+            if key not in by_type_table:
+                by_type_table[key] = []
+            by_type_table[key].append(result)
         
-        # Format each type
-        for kb_type, chunks in by_type.items():
-            context_parts.append(f"\n--- {kb_type.upper().replace('_', ' ')} ---")
-            for chunk in chunks[:5]:  # Limit to 5 per type
-                table = chunk['metadata'].get('table', 'N/A')
+        # Sort by type priority (table_schema first, then column_definition, then data_patterns)
+        type_priority = {
+            'table_schema': 1,
+            'column_definition': 2,
+            'data_patterns': 3,
+            'business_rule': 4
+        }
+        
+        sorted_keys = sorted(
+            by_type_table.keys(),
+            key=lambda k: (type_priority.get(k.split('::')[0], 99), k)
+        )
+        
+        # Format each type/table combination
+        for key in sorted_keys:
+            kb_type, table = key.split('::')
+            chunks = by_type_table[key]
+            
+            # Limit chunks per type/table combination
+            chunks = chunks[:3]
+            
+            context_parts.append(f"\n--- {kb_type.upper().replace('_', ' ')}: {table} ---")
+            for chunk in chunks:
                 column = chunk['metadata'].get('column', '')
-                context_parts.append(f"\nTable: {table}" + (f", Column: {column}" if column else ""))
+                if column:
+                    context_parts.append(f"\n[Column: {column}]")
+                
+                # Add relevance indicator if available
+                distance = chunk.get('distance')
+                if distance is not None:
+                    relevance = "High" if distance < 0.3 else "Medium" if distance < 0.6 else "Low"
+                    context_parts.append(f"[Relevance: {relevance}]")
+                
                 context_parts.append(chunk['content'])
+                context_parts.append("")  # Blank line between chunks
         
         return "\n".join(context_parts)
+    
+    def _expand_query(self, query: str) -> str:
+        """
+        Expand search query with synonyms and related terms to improve retrieval
+        
+        Args:
+            query: Original search query
+        
+        Returns:
+            Expanded query string
+        """
+        # Simple expansion: add common synonyms and variations
+        # This helps with semantic search when exact terms don't match
+        
+        # Common banking/financial term expansions
+        expansions = {
+            'loan': ['loan', 'lending', 'credit', 'advance'],
+            'customer': ['customer', 'client', 'account holder', 'borrower'],
+            'account': ['account', 'acct', 'acc'],
+            'active': ['active', 'current', 'open', 'live'],
+            'closed': ['closed', 'inactive', 'terminated', 'settled'],
+            'balance': ['balance', 'amount', 'outstanding'],
+            'date': ['date', 'time', 'timestamp', 'when'],
+            'status': ['status', 'state', 'condition', 'flag']
+        }
+        
+        query_lower = query.lower()
+        expanded_terms = [query]  # Always include original
+        
+        # Add expansions for terms found in query
+        for term, synonyms in expansions.items():
+            if term in query_lower:
+                expanded_terms.extend(synonyms)
+        
+        # Combine into expanded query (use original + key synonyms)
+        # Limit to avoid diluting the query too much
+        if len(expanded_terms) > 1:
+            # Use original query as primary, add 2-3 most relevant synonyms
+            expanded = f"{query} {' '.join(expanded_terms[1:4])}"
+            return expanded
+        
+        return query
     
     def clear_all(self, delete_files: bool = False):
         """
@@ -334,6 +427,13 @@ class VectorKnowledgeBase:
         Args:
             delete_files: If True, deletes the entire ChromaDB database directory. 
                          If False (default), only clears the collection data.
+        
+        Note:
+            After deletion, some ChromaDB system tables may remain in chroma.sqlite3
+            (e.g., embeddings_queue, embeddings_fts, documents_fts). This is normal
+            ChromaDB behavior - these are empty system tables used for internal
+            operations. They will be recreated on next initialization and don't
+            contain any user data.
         """
         self._ensure_initialized()
         

@@ -27,6 +27,7 @@ from sqlalchemy import bindparam
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.services.prompt_loader import get_prompt_loader
 
 _logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ class FollowUpAgentService:
     def __init__(self):
         self._llm = None
         self._initialized = False
+        self._prompt_loader = get_prompt_loader()
 
     def _ensure_initialized(self):
         if self._initialized:
@@ -155,113 +157,7 @@ class FollowUpAgentService:
         return {"needs_followup": needs and len(questions) > 0, "followup_questions": questions, "analysis": analysis}
 
     def _system_prompt(self) -> str:
-        return (
-            "You are an intelligent follow-up question generator for a banking data assistant.\n"
-            "Your job is to analyze user questions and generated SQL queries to identify ANY ambiguities, "
-            "missing information, or clarifications needed BEFORE executing the SQL query.\n"
-            "You must output ONLY valid JSON.\n\n"
-            "Your goal is to ensure the query will execute correctly and return the data the user actually wants.\n\n"
-            "Types of follow-up questions you can ask (not limited to these):\n"
-            "1) Date/Time Ambiguity:\n"
-            "   - Multiple date columns exist and the question doesn't specify which one to use\n"
-            "   - The question is vague about time periods (e.g., 'recently', 'last month' without specifics)\n"
-            "   - The SQL might be using the wrong date column\n"
-            "   - Question format: 'Which date column should be used?' with options\n\n"
-            "2) Data Freshness:\n"
-            "   - Data is significantly stale (lag_days exceeds threshold)\n"
-            "   - User's question implies they want current/recent data\n"
-            "   - Question format: 'Data freshness information: Last available data is from YYYY-MM-DD, which is X days old. Do you want to proceed?'\n\n"
-            "3) Filter Value Clarification:\n"
-            "   - Vague filter values (e.g., 'high value', 'recent', 'active' without clear definition)\n"
-            "   - Missing filter values that are needed for accurate results\n"
-            "   - Ambiguous categorical values\n\n"
-            "4) Join/Relationship Confirmation:\n"
-            "   - Multiple possible join paths exist\n"
-            "   - Ambiguity about which tables to join\n"
-            "   - Missing join conditions that might affect results\n\n"
-            "5) Aggregation Method:\n"
-            "   - Question is ambiguous about aggregation (sum, count, average, max, min)\n"
-            "   - Grouping requirements are unclear\n\n"
-            "6) Output Format/Scope:\n"
-            "   - Limit/row count preferences\n"
-            "   - Column selection preferences\n"
-            "   - Sorting preferences\n\n"
-            "7) Any Other Clarification:\n"
-            "   - Any ambiguity that could lead to incorrect or unexpected results\n"
-            "   - Missing information needed to complete the query accurately\n\n"
-            "CRITICAL RULES:\n"
-            "- Ask questions ONLY when there is ACTUAL ambiguity or missing information that could affect results.\n"
-            "- Do NOT ask questions when the intent is clear and unambiguous.\n"
-            "- You can ask MULTIPLE follow-up questions if multiple ambiguities exist.\n"
-            "- Return ALL relevant questions in the 'followup_questions' array.\n"
-            "- Order questions logically (most critical first).\n"
-            "- For date freshness questions, ALWAYS include the exact max available date and lag days from the provided metadata.\n"
-            "- For date column questions, provide ALL available date columns as options.\n"
-            "- CRITICAL: If the payload contains 'invalid_tables_in_sql' with table names, the SQL query uses non-existent tables. "
-            "DO NOT ask questions about these invalid tables (e.g., 'table is empty', 'table has no data'). "
-            "Instead, you may ask if the user meant a different table from the valid tables, or note that the SQL needs correction. "
-            "NEVER reference invalid/non-existent tables in your questions.\n\n"
-            "Output format:\n"
-            "{\n"
-            "  \"needs_followup\": true/false,\n"
-            "  \"followup_questions\": [\n"
-            "    {\n"
-            "      \"id\": \"unique_question_id\",\n"
-            "      \"question\": \"Clear, specific question text\",\n"
-            "      \"type\": \"date_selection|confirmation|text_input|choice|number_input|etc\",\n"
-            "      \"options\": [\"option1\", \"option2\", ...],  // Required for choice/date_selection types\n"
-            "      \"required\": true/false,\n"
-            "      \"default\": \"default_value\"  // Optional\n"
-            "    }\n"
-            "  ],\n"
-            "  \"analysis\": \"Brief explanation of why these questions are needed\"\n"
-            "}\n\n"
-            "Question Types:\n"
-            "- 'date_selection': User selects from date column options\n"
-            "- 'confirmation': Yes/No question (e.g., data freshness)\n"
-            "- 'text_input': User enters text (e.g., filter values)\n"
-            "- 'choice': User selects from predefined options\n"
-            "- 'number_input': User enters a number (e.g., threshold values)\n"
-            "- Use other types as needed for specific clarifications\n\n"
-            "Analysis Guidelines:\n"
-            "1. Carefully read the user's question and the generated SQL query.\n"
-            "2. Compare them to identify any mismatches, ambiguities, or missing information.\n"
-            "3. Consider the schema context provided - are there multiple ways to interpret the question?\n"
-            "4. Check if date/time information is ambiguous or if data freshness is a concern.\n"
-            "5. Look for vague terms that need clarification (e.g., 'high value', 'recent', 'active').\n"
-            "6. Identify if joins are missing or ambiguous.\n"
-            "7. Determine if aggregation methods are unclear.\n"
-            "8. Only ask questions when clarification is genuinely needed - don't over-question.\n\n"
-            "Examples:\n"
-            "Example 1 (Date ambiguity - ASK):\n"
-            "Question: 'Show me all loans opened in the last 3 months'\n"
-            "SQL uses: OPENING_DATE\n"
-            "Available date columns: ['OPENING_DATE', 'INSERTED_ON', 'LAST_UPDATED_TS']\n"
-            "→ ASK date_column question because 'opened' could mean OPENING_DATE or INSERTED_ON.\n\n"
-            "Example 2 (Date ambiguity - DO NOT ASK):\n"
-            "Question: 'Customers whose ReKYC due >6 months'\n"
-            "SQL uses: RE_KYC_DUE_DATE (matches question keyword 'due')\n"
-            "→ Do NOT ask - question explicitly mentions 'ReKYC due' which clearly maps to RE_KYC_DUE_DATE.\n\n"
-            "Example 3 (Freshness - ASK):\n"
-            "Question: 'Show me all current accounts'\n"
-            "Freshness: {'table_name': {'max_value': '2025-01-15', 'lag_days': 5}}\n"
-            "→ ASK freshness question because 'current' implies recent data, but data is 5 days old.\n\n"
-            "Example 4 (Multiple ambiguities - ASK BOTH):\n"
-            "Question: 'Show me all records from the last 6 months'\n"
-            "SQL uses: INSERTED_ON\n"
-            "Available date columns: ['OPENING_DATE', 'INSERTED_ON', 'LAST_UPDATED_TS']\n"
-            "Freshness: {'table_name': {'max_value': '2025-01-15', 'lag_days': 5}}\n"
-            "→ ASK BOTH date column selection AND freshness confirmation.\n\n"
-            "Example 5 (No ambiguity - DO NOT ASK):\n"
-            "Question: 'Show me loans with tenure less than 12 months'\n"
-            "SQL uses: TENURE column correctly\n"
-            "→ Do NOT ask - question is clear and SQL matches intent.\n\n"
-            "Example 6 (Vague filter - ASK):\n"
-            "Question: 'Show me high value loans'\n"
-            "SQL uses: BALANCE > 1000000 (assumed threshold)\n"
-            "→ ASK for clarification: 'What amount threshold should be used for high value loans?'\n"
-            "Type: 'number_input' or 'choice' with options like ['> 1M', '> 5M', '> 10M']\n\n"
-        )
+        return self._prompt_loader.get_prompt("followup_agent", "system_prompt")
 
     def _build_prompt(
         self,

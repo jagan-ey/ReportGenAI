@@ -79,8 +79,8 @@ class Settings(BaseSettings):
     KNOWLEDGE_CHUNK_OVERLAP: int = 200  # Overlap between chunks
     MAX_RETRIEVAL_RESULTS: int = 5  # Max number of knowledge chunks to retrieve
     
-    # Knowledge Base Document Paths
-    BUSINESS_DOCS_PATH: str = "backend/data/business_docs"  # Path to business documents
+    # Prompt Configuration
+    PROMPTS_FILE: str = "app/prompts/prompts.json"  # Path to prompts JSON file (relative to backend directory)
     
     # SQL Agent Configuration
     # Comma-separated list of allowed tables for SQL agent (empty = all tables)
@@ -91,6 +91,45 @@ class Settings(BaseSettings):
     # These are common audit column names used across tables
     # Comma-separated list, checked in order of preference
     AUDIT_COLUMNS: str = "LAST_UPDATED_TS,INSERTED_ON,UPDATED_DATE,CREATED_DATE,MODIFIED_DATE"  # Common audit column names
+    
+    # ============================================
+    # SSO/IAM Authentication Configuration
+    # ============================================
+    # Feature flag: Set to True to enable SSO, False for username/password auth
+    SSO_ENABLED: bool = False
+    
+    # SSO Type: "oauth2_oidc", "saml", "proxy", or "legacy" (username/password)
+    SSO_TYPE: str = Field(
+        default="legacy",
+        validation_alias=AliasChoices("SSO_TYPE", "AUTH_TYPE")
+    )
+    
+    # OAuth2/OIDC Settings (for Azure AD, Okta, Auth0, etc.)
+    SSO_AUTHORITY: str = ""  # e.g., "https://login.microsoftonline.com/{tenant-id}"
+    SSO_CLIENT_ID: str = ""
+    SSO_CLIENT_SECRET: str = ""
+    SSO_AUDIENCE: str = ""  # API audience/identifier
+    SSO_JWKS_URL: str = ""  # JWKS endpoint for token validation
+    SSO_REDIRECT_URI: str = ""  # Callback URL after SSO login
+    SSO_SCOPE: str = "openid profile email"  # OAuth2 scopes
+    
+    # SAML Settings (for SAML 2.0 providers)
+    SAML_ENTITY_ID: str = ""  # Service Provider Entity ID
+    SAML_SSO_URL: str = ""  # IdP SSO URL
+    SAML_CERT_PATH: str = ""  # Path to IdP certificate
+    
+    # Reverse Proxy Authentication (for Nginx/Apache SSO)
+    PROXY_AUTH_HEADER_USER: str = "X-Remote-User"  # Header containing username
+    PROXY_AUTH_HEADER_EMAIL: str = "X-Remote-Email"  # Header containing email
+    PROXY_AUTH_HEADER_GROUPS: str = "X-Remote-Groups"  # Header containing groups/roles
+    
+    # Role Mapping (maps SSO roles to application roles)
+    # Format: "sso_role1:app_role1,sso_role2:app_role2"
+    SSO_ROLE_MAPPING: str = "admin:admin,approver:approver,user:user"
+    
+    # Token Validation
+    SSO_TOKEN_VALIDATION_ENABLED: bool = True  # Validate tokens on each request
+    SSO_TOKEN_CACHE_TTL: int = 300  # Cache validated tokens for 5 minutes
     
     class Config:
         env_file = ".env"

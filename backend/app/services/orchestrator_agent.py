@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.services.predefined_queries_db import match_question_to_predefined
 from app.services.conversational_agent import ConversationalAgent
+from app.services.prompt_loader import get_prompt_loader
 from app.core.config import settings
 import json
 
@@ -22,6 +23,7 @@ class OrchestratorAgent:
         self._conversational = ConversationalAgent(db_url)
         self._llm = None
         self._initialized = False
+        self._prompt_loader = get_prompt_loader()
 
     def _ensure_initialized(self):
         if self._initialized:
@@ -54,32 +56,8 @@ class OrchestratorAgent:
                 return {"route": "conversational", "reason": "fallback_keyword"}
             return {"route": "report_sql", "reason": "fallback_default"}
 
-        # Keep prompt simple but explicit; the LLM should infer meta follow-ups without a keyword list.
-        sys_prompt = (
-            "You are an orchestrator for a banking data assistant.\n"
-            "Decide the correct route for the user's message.\n\n"
-            "Routes:\n"
-            "- conversational: user is chatting, asking for explanation, schema info, or asking follow-up/meta questions "
-            "about the PREVIOUS result (e.g., asking where the data came from, what table was used, or what SQL ran).\n"
-            "- report_sql: user is requesting a report/data retrieval that requires generating and executing SQL.\n\n"
-            "Rules:\n"
-            "- If the user asks about the previous result and previous_sql_query is provided, choose conversational.\n"
-            "- Otherwise choose report_sql only when the user clearly asks to fetch/report data.\n"
-            "- Return ONLY valid JSON with keys: route (conversational|report_sql), reason (short string).\n"
-            "\n"
-            "Examples:\n"
-            "Input: {\"question\":\"List customers by state\",\"has_previous_sql_query\":false}\n"
-            "Output: {\"route\":\"report_sql\",\"reason\":\"data_request\"}\n"
-            "\n"
-            "Input: {\"question\":\"hi, what can you do?\",\"has_previous_sql_query\":false}\n"
-            "Output: {\"route\":\"conversational\",\"reason\":\"general_chat\"}\n"
-            "\n"
-            "Input: {\"question\":\"from which table we got this data?\",\"has_previous_sql_query\":true}\n"
-            "Output: {\"route\":\"conversational\",\"reason\":\"followup_about_previous_result\"}\n"
-            "\n"
-            "Input: {\"question\":\"run the same report but for >3 months\",\"has_previous_sql_query\":true}\n"
-            "Output: {\"route\":\"report_sql\",\"reason\":\"new_data_request\"}\n"
-        )
+        # Load prompt from external file
+        sys_prompt = self._prompt_loader.get_prompt("orchestrator", "system_prompt")
 
         prev_sql = (previous_sql_query or "").strip()
         user_prompt = json.dumps(

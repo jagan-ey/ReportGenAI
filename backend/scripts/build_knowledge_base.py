@@ -4,7 +4,6 @@ Build Vector Knowledge Base
 Script to initialize and build the vector knowledge base from:
 1. Database schema
 2. Sample data
-3. Business documents
 """
 
 import sys
@@ -44,7 +43,7 @@ def main():
     try:
         # Ask user what to build
         print("\nWhat would you like to build?")
-        print("1. Full knowledge base (schema + data + documents)")
+        print("1. Full knowledge base (schema + sample data)")
         print("2. Schema only")
         print("3. Schema + sample data")
         print("4. Clear existing knowledge base")
@@ -63,6 +62,8 @@ def main():
                 if confirm == "yes":
                     vector_kb.clear_all(delete_files=True)
                     _logger.info("✅ Knowledge base cleared and database files deleted")
+                    _logger.info("ℹ️  Note: Some ChromaDB system tables may remain in chroma.sqlite3.")
+                    _logger.info("   This is normal - they are empty system tables and will be recreated on next use.")
                 else:
                     _logger.info("Cancelled")
             elif clear_choice == "1":
@@ -90,22 +91,19 @@ def main():
             stats = processor.build_knowledge_base(
                 db=db,
                 include_schema=True,
-                include_sample_data=True,
-                include_documents=True
+                include_sample_data=True
             )
         elif choice == "2":
             stats = processor.build_knowledge_base(
                 db=db,
                 include_schema=True,
-                include_sample_data=False,
-                include_documents=False
+                include_sample_data=False
             )
         elif choice == "3":
             stats = processor.build_knowledge_base(
                 db=db,
                 include_schema=True,
-                include_sample_data=True,
-                include_documents=False
+                include_sample_data=True
             )
         else:
             _logger.error("Invalid choice")

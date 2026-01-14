@@ -115,14 +115,25 @@ class SQLAgentService:
                 _sql_agent_logger.info("SQL Agent allowed to access all tables (no restriction)")
             
             # Use include_tables only if specified, otherwise allow all tables
-            db_kwargs = {
-                "uri": self.db_url,
-                "sample_rows_in_table_info": 3  # Include sample rows for better context
-            }
-            if allowed_tables:
-                db_kwargs["include_tables"] = allowed_tables
-            
-            self._db = SQLDatabase.from_uri(**db_kwargs)
+            # Handle both old and new langchain API signatures
+            try:
+                # Try new API first (langchain >= 0.2): database_uri parameter
+                db_kwargs = {
+                    "database_uri": self.db_url,
+                    "sample_rows_in_table_info": 3  # Include sample rows for better context
+                }
+                if allowed_tables:
+                    db_kwargs["include_tables"] = allowed_tables
+                self._db = SQLDatabase.from_uri(**db_kwargs)
+            except TypeError:
+                # Fallback to old API (langchain < 0.2): uri parameter
+                db_kwargs = {
+                    "uri": self.db_url,
+                    "sample_rows_in_table_info": 3
+                }
+                if allowed_tables:
+                    db_kwargs["include_tables"] = allowed_tables
+                self._db = SQLDatabase.from_uri(**db_kwargs)
 
             # Ensure any SQL executed through LangChain tools is cleaned (strip ```sql fences)
             # This prevents SQL Server errors like "Incorrect syntax near '`'" when models wrap SQL in markdown.

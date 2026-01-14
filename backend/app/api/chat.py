@@ -81,19 +81,16 @@ def _check_semantic_mismatch(original_question: str, corrected_sql: str) -> bool
             temperature=0.0,
         )
         
-        system_prompt = (
-            "You are a semantic analysis expert. Your job is to determine if a SQL query's columns "
-            "semantically match what the user asked for in their question.\n\n"
-            "Return ONLY 'YES' if the columns in the SQL semantically match the user's question, "
-            "or 'NO' if there's a semantic mismatch (e.g., user asks for 'credit score' but SQL uses 'sanction limit').\n\n"
-            "Be strict: Only return 'NO' if there's a clear semantic mismatch. "
-            "If the columns are related or could reasonably answer the question, return 'YES'."
-        )
+        from app.services.prompt_loader import get_prompt_loader
+        prompt_loader = get_prompt_loader()
         
-        user_prompt = (
-            f"User's question: {original_question}\n\n"
-            f"Columns used in corrected SQL: {sql_columns_str}\n\n"
-            f"Does the SQL query semantically match what the user asked for? Answer YES or NO only."
+        system_prompt = prompt_loader.get_prompt("semantic_analysis", "system_prompt")
+        
+        user_prompt = prompt_loader.get_prompt(
+            "semantic_analysis",
+            "user_prompt_template",
+            original_question=original_question,
+            sql_columns_str=sql_columns_str
         )
         
         response = llm.invoke([
