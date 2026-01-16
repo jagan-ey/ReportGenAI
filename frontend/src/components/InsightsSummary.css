@@ -1,0 +1,66 @@
+.insights-summary {
+  margin: 1rem 0;
+  padding: 1rem 1.5rem;
+  background: linear-gradient(135deg, #667eea15 0%, #764ba215 100%);
+  border-left: 4px solid #667eea;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+}
+
+.insights-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.insights-icon {
+  font-size: 1.5rem;
+}
+
+.insights-header h4 {
+  margin: 0;
+  font-size: 1.1rem;
+  color: #333;
+  font-weight: 600;
+}
+
+.insights-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.insight-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+  padding: 0.5rem;
+  background: white;
+  border-radius: 6px;
+  transition: transform 0.2s ease;
+}
+
+.insight-item:hover {
+  transform: translateX(5px);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+}
+
+.insight-item:last-child {
+  margin-bottom: 0;
+}
+
+.insight-bullet {
+  color: #667eea;
+  font-size: 1.5rem;
+  font-weight: bold;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.insight-text {
+  color: #555;
+  line-height: 1.5;
+  font-size: 0.95rem;
+}

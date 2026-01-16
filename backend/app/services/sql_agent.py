@@ -699,9 +699,16 @@ class SQLAgentService:
         sql = self._clean_sql_string(sql)
         sql_upper = sql.upper().strip()
         # Prevent dangerous operations
+        # old code : failed at created_at columns
+        # dangerous_keywords = ['DROP', 'DELETE', 'TRUNCATE', 'ALTER', 'CREATE', 'INSERT', 'UPDATE']
+        # for keyword in dangerous_keywords:
+        #     if keyword in sql_upper:
+        #         return False
+        import re
         dangerous_keywords = ['DROP', 'DELETE', 'TRUNCATE', 'ALTER', 'CREATE', 'INSERT', 'UPDATE']
         for keyword in dangerous_keywords:
-            if keyword in sql_upper:
+            pattern = rf'\b{keyword}\b'
+            if re.search(pattern, sql_upper):
                 return False
         # Must be SELECT
         if not sql_upper.startswith('SELECT'):

@@ -4,6 +4,8 @@ import { useUser } from '../contexts/UserContext'
 import ApproverModal from './ApproverModal'
 import SpeechToText from './SpeechToText'
 import FollowUpQuestions from './FollowUpQuestions'
+import ChartRenderer from './ChartRenderer'
+import InsightsSummary from './InsightsSummary'
 import './ChatInterface.css'
 
 function ChatInterface({ initialQuestion, onQuestionSent }) {
@@ -103,7 +105,8 @@ function ChatInterface({ initialQuestion, onQuestionSent }) {
         success: response.success,
         isConversational: response.is_conversational || false,  // True if conversational (no SQL)
         agentUsed: response.agent_used || null,
-        routeReason: response.route_reason || null
+        routeReason: response.route_reason || null,
+        insights: response.insights || null  // Visualization insights
       }
       setMessages(prev => [...prev, botMessage])
 
@@ -155,7 +158,8 @@ function ChatInterface({ initialQuestion, onQuestionSent }) {
         success: response.success,
         isConversational: response.is_conversational || false,
         agentUsed: response.agent_used || null,
-        routeReason: response.route_reason || null
+        routeReason: response.route_reason || null,
+        insights: response.insights || null  // Visualization insights
       }
 
       // Replace the follow-up message with the resulting bot message
@@ -429,35 +433,49 @@ function ChatInterface({ initialQuestion, onQuestionSent }) {
                       <p className="response-summary">{msg.content}</p>
                     )}
                     
-                    {/* Data table if available */}
-                    {msg.success && !msg.isConversational && msg.data && msg.data.length > 0 && (
-                      <div className="data-table-container">
-                        <div className="table-header">
-                          <strong>Results ({msg.rowCount} row{msg.rowCount !== 1 ? 's' : ''})</strong>
-                        </div>
-                        <div className="table-wrapper">
-                          <table className="data-table">
-                            <thead>
-                              <tr>
-                                {Object.keys(msg.data[0]).map((key, idx) => (
-                                  <th key={idx}>{key}</th>
-                                ))}
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {msg.data.map((row, rowIdx) => (
-                                <tr key={rowIdx}>
-                                  {Object.values(row).map((value, colIdx) => (
-                                    <td key={colIdx}>
-                                      {value === null || value === undefined ? 'NULL' : String(value)}
-                                    </td>
+                    {/* Chart and Insights if available (not for table type) */}
+                    {msg.success && !msg.isConversational && msg.insights && msg.insights.chart_type !== 'table' && msg.data && msg.data.length > 0 && (
+                      <>
+                        <ChartRenderer insights={msg.insights} data={msg.data} />
+                        <InsightsSummary insights={msg.insights} />
+                      </>
+                    )}
+                    
+                    {/* Data table: show if no insights, OR if chart_type is 'table', OR always when data exists */}
+                    {msg.success && !msg.isConversational && msg.data && msg.data.length > 0 && (!msg.insights || msg.insights.chart_type === 'table') && (
+                      <>
+                        {/* Show insights summary for table type */}
+                        {msg.insights && msg.insights.chart_type === 'table' && (
+                          <InsightsSummary insights={msg.insights} />
+                        )}
+                        <div className="data-table-container">
+                          <div className="table-header">
+                            <strong>Results ({msg.rowCount} row{msg.rowCount !== 1 ? 's' : ''})</strong>
+                          </div>
+                          <div className="table-wrapper">
+                            <table className="data-table">
+                              <thead>
+                                <tr>
+                                  {Object.keys(msg.data[0]).map((key, idx) => (
+                                    <th key={idx}>{key}</th>
                                   ))}
                                 </tr>
-                              ))}
-                            </tbody>
-                          </table>
+                              </thead>
+                              <tbody>
+                                {msg.data.map((row, rowIdx) => (
+                                  <tr key={rowIdx}>
+                                    {Object.values(row).map((value, colIdx) => (
+                                      <td key={colIdx}>
+                                        {value === null || value === undefined ? 'NULL' : String(value)}
+                                      </td>
+                                    ))}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
                         </div>
-                      </div>
+                      </>
                     )}
                     
                     {/* Error message */}

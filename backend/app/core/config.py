@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     MAX_QUERY_ROWS: int = 1000  # Limit query results
     QUERY_TIMEOUT: int = 30  # seconds (SQL Server may need more time)
     
+    # Insight Agent Settings
+    INSIGHT_MIN_ROWS: int = 3  # Minimum rows required to generate visualizations
+    
     # BIU SPOC Contact Information
     # NOTE: These are generic defaults. Configure via environment variables for production.
     BIU_SPOC_NAME: str = "BIU Support Team"

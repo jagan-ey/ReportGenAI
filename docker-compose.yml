@@ -1,0 +1,103 @@
+version: '3.8'
+
+services:
+  # Backend FastAPI Service
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ccm-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # Application Settings
+      - DEBUG=${DEBUG:-false}
+      - HOST=0.0.0.0
+      - PORT=8000
+      
+      # Azure OpenAI Configuration
+      - AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY}
+      - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}
+      - AZURE_OPENAI_CHAT_DEPLOYMENT=${AZURE_OPENAI_CHAT_DEPLOYMENT:-gpt-4o}
+      - AZURE_OPENAI_API_VERSION=${AZURE_OPENAI_API_VERSION:-2025-01-01-preview}
+      
+      # Main Application Database (SQL Server)
+      - DB_DRIVER=${DB_DRIVER:-ODBC Driver 17 for SQL Server}
+      - DB_SERVER=${DB_SERVER}
+      - DB_NAME=${DB_NAME}
+      - DB_USERNAME=${DB_USERNAME}
+      - DB_PASSWORD=${DB_PASSWORD}
+      
+      # Knowledge Base Database (Regulatory Data Mart)
+      - KB_DB_SERVER=${KB_DB_SERVER:-${DB_SERVER}}
+      - KB_DB_NAME=${KB_DB_NAME}
+      - KB_DB_USERNAME=${KB_DB_USERNAME:-${DB_USERNAME}}
+      - KB_DB_PASSWORD=${KB_DB_PASSWORD:-${DB_PASSWORD}}
+      
+      # CORS Origins (comma-separated)
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://localhost:80,http://frontend}
+      
+      # Vector Database
+      - VECTOR_DB_PATH=${VECTOR_DB_PATH:-data/vector_db}
+      
+      # SSO Configuration (optional)
+      - SSO_ENABLED=${SSO_ENABLED:-false}
+      
+      # BIU SPOC Configuration (optional)
+      - BIU_SPOC_NAME=${BIU_SPOC_NAME:-BIU Support Team}
+      - BIU_SPOC_EMAIL=${BIU_SPOC_EMAIL:-biu.support@bank.com}
+      - BIU_SPOC_PHONE=${BIU_SPOC_PHONE:-+91-22-2425-2525}
+      
+      # Initialization Settings
+      # Set SKIP_KB_BUILD=true to skip knowledge base build on first run
+      - SKIP_KB_BUILD=${SKIP_KB_BUILD:-false}
+      # KB_BUILD_MODE: full (default), schema, or skip
+      - KB_BUILD_MODE=${KB_BUILD_MODE:-full}
+    volumes:
+      # Persist initialization flag and data
+      # Persist data directory (includes vector DB and initialization flag)
+      - backend_data:/app/data
+      # Persist logs (optional)
+      - backend_logs:/app/logs
+    networks:
+      - ccm-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Frontend React Service (Nginx)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ccm-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - ccm-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+# Named volumes for data persistence
+volumes:
+  backend_data:
+    driver: local
+  backend_logs:
+    driver: local
+
+# Network for inter-service communication
+networks:
+  ccm-network:
+    driver: bridge

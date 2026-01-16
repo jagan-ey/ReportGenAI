@@ -8,8 +8,8 @@ const UserContext = createContext()
 
 // Industry standard: Inactivity timeout (30 seconds as per user requirement)
 // Note: Industry standards typically recommend 15-30 minutes, but user requested 30 seconds for high security
-const INACTIVITY_TIMEOUT_MS = 30 * 1000 // 30 seconds
-const WARNING_THRESHOLD_MS = 5 * 1000 // Show warning 5 seconds before timeout
+const INACTIVITY_TIMEOUT_MS = 30 * 10000 // 30 seconds
+const WARNING_THRESHOLD_MS = 5 * 10000 // Show warning 5 seconds before timeout
 
 export const useUser = () => {
   const context = useContext(UserContext)

@@ -7,7 +7,7 @@ import os
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.core.database import engine, get_db
+from app.core.database import get_engine, get_db
 from app.models.user import User
 from app.services.auth import hash_password
 from app.database.schema import Base
@@ -16,6 +16,7 @@ from datetime import datetime
 def seed_users():
     """Seed initial users"""
     # Create tables if they don't exist
+    engine = get_engine()
     Base.metadata.create_all(bind=engine)
     
     db = next(get_db())

@@ -207,6 +207,7 @@ from app.services.orchestrator_agent import OrchestratorAgent
 from app.services.sql_maker_agent import SQLMakerAgent
 from app.services.followup_agent import FollowUpAgentService
 from app.services.sql_validator_agent import SQLValidatorAgent
+from app.services.insight_agent import InsightAgent
 from app.core.config import settings
 
 router = APIRouter()
@@ -260,6 +261,16 @@ def _get_followup_agent() -> FollowUpAgentService:
     return _followup_agent
 
 
+_insight_agent = None
+
+
+def _get_insight_agent() -> InsightAgent:
+    global _insight_agent
+    if _insight_agent is None:
+        _insight_agent = InsightAgent()
+    return _insight_agent
+
+
 class ChatRequest(BaseModel):
     question: str
     query_key: Optional[str] = None  # If provided, directly use this predefined query (no matching needed)
@@ -285,6 +296,7 @@ class ChatResponse(BaseModel):
     needs_followup: Optional[bool] = False
     followup_questions: Optional[list] = None
     followup_analysis: Optional[str] = None
+    insights: Optional[dict] = None  # Visualization recommendations and business insights
 
 
 @router.post("/query", response_model=ChatResponse)
@@ -397,6 +409,24 @@ async def chat_query(
                 data = [dict(zip(columns, row)) for row in rows]
                 row_count = len(data)
                 answer = f"Found {row_count} record(s) matching the criteria." if row_count else "No records found matching the criteria."
+                
+                # Generate insights for predefined queries (only in report mode)
+                insights = None
+                if mode == "report" and len(data) > settings.INSIGHT_MIN_ROWS:
+                    try:
+                        _logger.info(f"Generating insights for predefined query with {len(data)} rows...")
+                        insight_agent = _get_insight_agent()
+                        insights = insight_agent.analyze(
+                            data=data,
+                            sql_query=predefined["sql"].strip(),
+                            question=request.question,
+                            schema_info=None
+                        )
+                        _logger.info(f"Insights generated successfully for predefined query")
+                    except Exception as e:
+                        _logger.error(f"Failed to generate insights for predefined query: {str(e)}")
+                        insights = None
+                
                 return ChatResponse(
                     answer=answer,
                     sql_query=predefined["sql"].strip(),
@@ -407,6 +437,7 @@ async def chat_query(
                     success=True,
                     agent_used="predefined",
                     route_reason="matched_predefined",
+                    insights=insights,
                 )
             except Exception as e:
                 return ChatResponse(
@@ -582,6 +613,25 @@ async def chat_query(
             else:
                 answer_text = f"Found {row_count} record(s)."
 
+            # Generate insights if row count exceeds threshold (only in report mode)
+            insights = None
+            if mode == "report" and len(data) > settings.INSIGHT_MIN_ROWS:
+                try:
+                    _logger.info(f"Generating insights for {len(data)} rows...")
+                    insight_agent = _get_insight_agent()
+                    insights = insight_agent.analyze(
+                        data=data,
+                        sql_query=cleaned_sql,
+                        question=request.question,
+                        schema_info=None
+                    )
+                    _logger.info(f"Insights generated successfully")
+                except Exception as e:
+                    _logger.error(f"Failed to generate insights: {str(e)}")
+                    insights = None
+            else:
+                _logger.debug(f"Skipping insight generation: mode={mode}, row_count={row_count}, threshold={settings.INSIGHT_MIN_ROWS}")
+
             return ChatResponse(
                 answer=answer_text,
                 sql_query=cleaned_sql,
@@ -591,6 +641,7 @@ async def chat_query(
                 success=True,
                 agent_used=used_agent,
                 route_reason=decision.get("reason"),
+                insights=insights,
             )
         except Exception as e:
             error_str = str(e)
@@ -715,6 +766,23 @@ async def chat_query(
                                     else:
                                         answer_text = f"Found {row_count} record(s)."
                                     
+                                    # Generate insights for validator-corrected queries (only in report mode)
+                                    insights = None
+                                    if mode == "report" and len(data) > settings.INSIGHT_MIN_ROWS:
+                                        try:
+                                            _logger.info(f"Generating insights for validator-corrected query with {len(data)} rows...")
+                                            insight_agent = _get_insight_agent()
+                                            insights = insight_agent.analyze(
+                                                data=data,
+                                                sql_query=corrected_sql,
+                                                question=request.question,
+                                                schema_info=None
+                                            )
+                                            _logger.info(f"Insights generated successfully for validator-corrected query")
+                                        except Exception as e:
+                                            _logger.error(f"Failed to generate insights for validator-corrected query: {str(e)}")
+                                            insights = None
+                                    
                                     return ChatResponse(
                                         answer=answer_text,
                                         sql_query=corrected_sql,
@@ -724,6 +792,7 @@ async def chat_query(
                                         success=True,
                                         agent_used=f"{used_agent}_validator_corrected",
                                         route_reason=decision.get("reason"),
+                                        insights=insights,
                                     )
                                 except Exception as retry_error:
                                     _validator_logger.error(f"❌ Corrected SQL execution also failed: {retry_error}")

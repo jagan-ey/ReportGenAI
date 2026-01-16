@@ -53,6 +53,9 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     if not plain_password or not hashed_password:
         return False
     
+    # Strip whitespace from password to match hash_password behavior
+    plain_password = str(plain_password).strip()
+    
     # Handle SHA256 fallback hashes
     if hashed_password.startswith("sha256$"):
         try:
@@ -80,6 +83,10 @@ def authenticate_user(db: Session, username: str, password: str) -> User:
     Authenticate a user by username/email and password
     Returns User object if authentication succeeds, None otherwise
     """
+    # Strip whitespace from inputs
+    username = str(username).strip()
+    password = str(password).strip()
+    
     # Try to find user by username or email
     user = db.query(User).filter(
         (User.USERNAME == username) | (User.EMAIL == username)
